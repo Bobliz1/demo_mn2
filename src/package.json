@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "markitdown": "^0.0.4",
+    "pptxgenjs": "^4.0.1"
+  }
+}
