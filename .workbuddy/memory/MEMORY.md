@@ -37,7 +37,7 @@ demo_mn2/
 ├── src/                      # 源码
 │   ├── main.py              # 实验入口（交互菜单 / 命令行）
 │   ├── benchmark.py         # BO 工具函数 + ExperimentLogger（无函数定义）
-│   ├── bo_transform.py      # 变换算子（连续参数化，6D 外层空间）
+│   ├── bo_transform.py      # 变换算子（【稳定模式】4D 外层空间：StandardScaler + MinMaxScaler）
 │   ├── generate_ppt.js      # PPT 生成脚本
 │   ├── package.json          # npm 依赖
 │   └── functions/           # 基准函数包（14 个文件）
@@ -74,31 +74,43 @@ D:\Miniconda3\envs\bo_env\python.exe src/main.py cliff_func double_well_func
 
 # 全部函数
 D:\Miniconda3\envs\bo_env\python.exe src/main.py --all
+
+# 快速验证（单函数，最小参数，约 2-5 分钟）
+# R=1（1次重复），M=5（外层迭代），N=8（内层步数），I=8（外层初始点）
+D:\Miniconda3\envs\bo_env\python.exe src/main.py cliff_func -R 1 -M 5 -N 8 -I 8
 ```
 
 ## 实验设计
 
+### 默认参数（完整实验）
 - 每个函数默认 **5 次重复**（seed 42-46），取均值±标准差
-- 外层：6 维连续空间 `[0,1]^6`，拉丁超方采样初始化 12 个点，GP 搜索 M=8 次
-- 内层 N=15 次标准 BO（EI 采集）
+- 外层：12 维连续空间 `[0,1]^12`，拉丁超方采样初始化 36 个点，GP 搜索 M=20 次
+- 内层：n_init=5 个初始点 + N=12 次 BO 迭代（EI 采集）
 - 汇总报告含：基线 Gap、MN-BO Gap、Gap 缩减差值、Gap 缩减比
+- **计算量估算（单 seed）**：全局初始化 5 次 + 基线 12 次 + 外层初始 36×12 + 外层搜索 20×12 = **689 次函数评估**
 
-## 外层搜索空间（12D 连续参数，v2 带 gate）
+### 快速实验参数（稳定算子模式，4D 空间）
+使用 `-R 1 -M 5 -N 8 -I 8`：
+- 外层：4 维连续空间 `[0,1]^4`，拉丁超方采样初始化 8 个点，GP 搜索 M=5 次
+- 内层：n_init=5 + N=8 次 BO 迭代
+- **计算量估算（单 seed）**：5 + 8 + 8×8 + 5×8 = **117 次函数评估**
+- **12 函数全跑**：12 × 117 = **1,404 次评估**
+
+## 外层搜索空间（稳定算子模式，4D 连续参数）
 
 | 维度 | 算子 | 参数范围 | 说明 |
 |------|------|---------|------|
-| p[0] | LogWarper | g ∈ [0,1] | 强度 gate，0=恒等 |
-| p[1] | LogWarper | α ∈ [0.1, 10.0] | 对数压缩强度 |
-| p[2] | StandardScaler | g ∈ [0,1] | 强度 gate |
-| p[3] | StandardScaler | shift ∈ [-1σ, 1σ] | 均值偏移 |
-| p[4] | StandardScaler | s ∈ [0.2, 5.0] | 方差缩放 |
-| p[5] | PowerTransform | g ∈ [0,1] | 强度 gate |
-| p[6] | PowerTransform | p ∈ [-1, 3] | 幂指数 |
-| p[7] | SigmoidWarper | g ∈ [0,1] | 强度 gate |
-| p[8] | SigmoidWarper | k ∈ [0.01, 10] | Sigmoid 陡度 |
-| p[9] | SigmoidWarper | c ∈ [-5σ, 5σ] | Sigmoid 中心 |
-| p[10] | MinMaxScaler | g ∈ [0,1] | 强度 gate |
-| p[11] | RankTransform | g ∈ [0,1] | 离散 gate，>0.5 启用 |
+| p[0] | StandardScaler | g ∈ [0,1] | 强度 gate |
+| p[1] | StandardScaler | shift ∈ [-1σ, 1σ] | 均值偏移 |
+| p[2] | StandardScaler | s ∈ [0.2, 5.0] | 方差缩放 |
+| p[3] | MinMaxScaler | g ∈ [0,1] | 强度 gate |
+
+### 待处理算子（已注释，待架构重构后恢复）
+以下算子因 backward() 数值稳定性问题已禁用：
+- **LogWarper**：`backward()` 含 `exp()`，大值溢出
+- **PowerTransform**：`backward()` 含 `power(1/p)`，p→0 时爆炸
+- **SigmoidWarper**：`backward()` 含 `log(y/(1-y))`，边界敏感
+- **RankTransform**：离散非连续，GP 难建模
 
 ## 版本控制
 

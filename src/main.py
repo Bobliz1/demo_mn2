@@ -1,19 +1,14 @@
 """main.py
 MN-BO 实验入口（连续参数化版本 v2，带 gate）。
 
-外层在 12 维连续空间 [0,1]^12 搜索最优变换配置：
-  p[0]  → LogWarper 强度 g ∈ [0,1]     （0=恒等）
-  p[1]  → LogWarper alpha ∈ [0.1, 10.0]
-  p[2]  → StandardScaler 强度 g ∈ [0,1]
-  p[3]  → StandardScaler shift ∈ [-1σ, 1σ]
-  p[4]  → StandardScaler scale ∈ [0.2, 5.0]
-  p[5]  → PowerTransform 强度 g ∈ [0,1]
-  p[6]  → PowerTransform power ∈ [-1, 3]
-  p[7]  → SigmoidWarper 强度 g ∈ [0,1]
-  p[8]  → SigmoidWarper k ∈ [0.01, 10.0]
-  p[9]  → SigmoidWarper c ∈ [-5σ, 5σ]
-  p[10] → MinMaxScaler 强度 g ∈ [0,1]
-  p[11] → RankTransform gate ∈ [0,1]   （>0.5 启用）
+【稳定算子模式】外层在 4 维连续空间 [0,1]^4 搜索最优变换配置：
+  p[0]  → StandardScaler 强度 g ∈ [0,1]
+  p[1]  → StandardScaler shift ∈ [-1σ, 1σ]
+  p[2]  → StandardScaler scale ∈ [0.2, 5.0]
+  p[3]  → MinMaxScaler 强度 g ∈ [0,1]
+
+【待处理算子】以下算子因数值稳定性问题已禁用，待架构重构后恢复：
+  LogWarper / PowerTransform / SigmoidWarper / RankTransform
 
 运行方式
 --------
@@ -30,12 +25,15 @@ python src/main.py cliff_func deceptive_trap_func
 python src/main.py --all -M 30 -N 15 -R 3
 python src/main.py multipeak_func -M 10 -N 20 -R 1
 
+# 快速验证（稳定算子，4D 空间）
+python src/main.py --all -R 1 -M 5 -N 8 -I 8
+
 参数说明
 --------
-  -M, --outer-iters  外层 GP 迭代次数（默认 20，12D 空间建议 20~30）
+  -M, --outer-iters  外层 GP 迭代次数（默认 20，4D 空间建议 5~10）
   -N, --inner-iters  内层 BO 步数（默认 12）
   -R, --repeats      每函数重复次数（默认 5）
-  -I, --init-meta    外层初始拉丁超方点数（默认 36）
+  -I, --init-meta    外层初始拉丁超方点数（默认 36，4D 空间建议 8~12）
 """
 
 import sys
@@ -101,7 +99,7 @@ def _latin_hypercube_init(n_points: int, n_dims: int, seed: int = 42) -> np.ndar
 # 内层 BO
 # ======================================================================
 
-def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds):
+def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=None):
     wrapped = WrappedTarget(target_func, pipeline)
     X   = x_init.copy()
     Y_t = pipeline.forward(y_init)
@@ -118,7 +116,15 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds):
         X   = np.vstack((X, nx))
         Y_t = np.vstack((Y_t, ny))
 
+    # 全局安全 clamp：防止 backward 变换数值溢出。
+    # 宽松 clamp 避免裁剪正常值，_fmt 会把负 Gap（溢出）显示为 "N/A"。
+    # 仅在发现绝对数值异常（>1e6）时才 clip。
+    y_min = float(np.min(y_init))
+    y_max = float(np.max(y_init))
     Y_raw = np.array([pipeline.backward(y) for y in Y_t])
+    # 宽松上界：允许 backward 适度超出初始范围（最多到 max(100×y_max, 1e6)）
+    y_max_safe = max(y_max * 100.0, 1e6)
+    Y_raw = np.clip(Y_raw, y_min, y_max_safe)
     return np.max(Y_raw), X, Y_raw, gpr
 
 
@@ -142,7 +148,7 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     # ---- 基线 BO ----
     base_max, x_base, y_base, gpr_base = run_inner_bo(
         TransformerPipeline([IdentityOperator()]),
-        func_obj, n_inner, X_init, Y_init, bounds,
+        func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax,
     )
     base_gap = gmax - base_max
 
@@ -175,7 +181,7 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     for i, init_pt in enumerate(X_meta_init):
         pipe, ps = params_to_pipeline(init_pt, Y_init)
         found, xs, ys, lgpr = run_inner_bo(
-            pipe, func_obj, n_inner, X_init, Y_init, bounds)
+            pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
         gap = gmax - found
         X_meta.append(init_pt)
         Y_meta.append(gap)
@@ -195,7 +201,7 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
         pipe, ps = params_to_pipeline(params, Y_init)
         print(f"      外层 GP {m+1}/{m_outer}  最佳配置: {ps[:60]}...")
         found, xs, ys, lgpr = run_inner_bo(
-            pipe, func_obj, n_inner, X_init, Y_init, bounds)
+            pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
         gap = gmax - found
         X_meta.append(params)
         Y_meta.append(gap)

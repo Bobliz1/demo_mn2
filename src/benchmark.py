@@ -5,6 +5,7 @@
 """
 
 import os
+import math
 from datetime import datetime
 
 import numpy as np
@@ -14,6 +15,52 @@ from scipy.optimize import minimize
 
 # 从 functions 包统一导入
 from functions import REGISTRY
+
+# ------------------------------------------------------------------
+# 科学计数法格式化（统一、有效数字）
+# ------------------------------------------------------------------
+
+def _fmt(val, sig=3):
+    """将数值格式化为科学计数法，保留 sig 位有效数字。
+
+    规则：
+    - NaN / ±inf   → "nan" / "inf"
+    - val < 0      → "N/A"（表示 backward 溢出，非合法结果）
+    - |val| ≥ 1e4 或 0<|val|<1e-3 → 科学计数法
+    - 否则          → 普通浮点数（最多 4 位有效数字）
+    """
+    try:
+        float_val = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+
+    if math.isnan(float_val):
+        return "nan"
+    if math.isinf(float_val):
+        return "inf" if float_val > 0 else "-inf"
+    if float_val < 0:
+        # 负值表示 backward 溢出（找到的值超过理论最大）→ 非合法结果
+        return "N/A"
+
+    abs_val = float_val
+    if abs_val >= 1e4 or (abs_val != 0 and abs_val < 1e-3):
+        return f"{float_val:.1e}" if sig == 3 else f"{float_val:.{sig-1}e}"
+    else:
+        return f"{float_val:.4g}"
+
+
+def _fmt_gap_diff(val, base_gap):
+    """格式化 Gap 缩减差值；若远超基线 Gap 则为溢出，标记 N/A。"""
+    try:
+        fv = float(val)
+    except (TypeError, ValueError):
+        return "N/A"
+    if fv < 0:
+        return "N/A"
+    # 若 gap_diff 超过基线 Gap 的 100 倍，视为溢出传播
+    if fv > abs(float(base_gap)) * 100:
+        return "N/A"
+    return _fmt(fv)
 
 # ------------------------------------------------------------------
 # 便利函数
@@ -106,6 +153,7 @@ class ExperimentLogger:
     ):
         """记录实验结果（含多次重复统计）到独立 md 文件。"""
         ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now_str       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         plot_filename = f"plot_{ts}.png"
         plot_path     = os.path.join(self.plot_dir, plot_filename)
         fig.savefig(plot_path, dpi=120, bbox_inches="tight")
@@ -114,18 +162,22 @@ class ExperimentLogger:
         md_path = os.path.join(self.results_dir, f"{self.func_name}_{ts}.md")
 
         with open(md_path, "w", encoding="utf-8") as f:
+            # 标题含日期时间
             f.write(f"# 实验报告：{self.func_name}\n\n")
-            f.write(f"> 记录时间：{datetime.now().strftime('%Y-%m-%d %H:%m:%S')}\n")
-            f.write(f"> 重复次数：{n_repeats}\n\n")
+            f.write(f"> **运行时间**：{now_str}\n")
+            f.write(f"> **重复次数**：{n_repeats}\n\n")
 
-            # 1. 统计结果
-            f.write("## 1. 统计结果（多次重复均值）\n\n")
-            f.write("| 指标 | 基线 BO | MN-BO（本方法） |\n")
-            f.write("|------|---------|----------------|\n")
-            f.write(f"| 理论最大值 | {self.global_max:.6f} | {self.global_max:.6f} |\n")
-            f.write(f"| Gap（均值） | {baseline_gap:.6f} ± {baseline_std:.6f} | {mnbo_gap:.6f} ± {mnbo_std:.6f} |\n")
-            f.write(f"| **Gap 缩减差值** | — | **{gap_diff_avg:.6f} ± {gap_diff_std:.6f}** |\n")
-            f.write(f"| **Gap 缩减比** | — | **{reduction_avg:.2f}% ± {reduction_std:.2f}%** |\n")
+            # 1. 核心结果表（无方差，科学计数法）
+            f.write("## 1. 核心结果\n\n")
+            f.write("| 指标 | 值 |\n")
+            f.write("|------|----|\n")
+            f.write(f"| 理论最大值 | {_fmt(self.global_max)} |\n")
+            f.write(f"| 基线 Gap | {_fmt(baseline_gap)} |\n")
+            f.write(f"| MN-BO Gap | {_fmt(mnbo_gap)} |\n")
+            f.write(f"| Gap 缩减差值 | {_fmt_gap_diff(gap_diff_avg, baseline_gap)} |\n")
+            # Gap 缩减比：仅当分母有意义且 mnbo_gap>=0 时才计算
+            red_str = f"{_fmt(reduction_avg)}%" if (math.isfinite(reduction_avg) and mnbo_gap >= 0) else "N/A"
+            f.write(f"| Gap 缩减比 | {red_str} |\n")
             f.write(f"\n- **最佳变换配置**：{best_config}\n\n")
 
             # 2. 可视化
@@ -154,26 +206,35 @@ class ExperimentLogger:
                            best_config,
                            n_repeats,
                            total_time):
-        """向全局汇总表追加一行。"""
+        """向全局汇总表追加一行（无方差，科学计数法，标题含日期时间）。"""
         write_header = not os.path.exists(summary_path)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Gap 缩减比格式化（inf/NaN → N/A，mnbo_gap<0 视为溢出 → N/A）
+        if not math.isfinite(reduction) or mnbo_gap < 0 or gap_diff < 0:
+            red_str = "N/A"
+        else:
+            red_str = f"{_fmt(reduction)}%"
+        gap_diff_fmt = _fmt_gap_diff(gap_diff, baseline_gap)
+
         with open(summary_path, "a", encoding="utf-8") as f:
             if write_header:
                 f.write("# 实验汇总报告\n\n")
+                f.write(f"> **报告生成时间**：{now_str}\n\n")
                 f.write("| 函数 | 理论最大值 | 基线 Gap | MN-BO Gap"
-                        " | Gap 缩减差值 | Gap 缩减比 | 最佳配置"
-                        " | 重复次数 | 耗时(s) |\n")
+                        " | Gap 缩减差值 | Gap 缩减比 |"
+                        " 重复次数 | 耗时(s) |\n")
                 f.write("|------|-----------|---------|----------|"
-                        "-------------|-----------|---------|"
-                        "---------|--------|\n")
+                        "-------------|-----------|"
+                        "--------|-------|\n")
 
             f.write(
                 f"| {self.func_name} "
-                f"| {self.global_max} "
-                f"| {baseline_gap:.4f}±{baseline_std:.4f} "
-                f"| {mnbo_gap:.4f}±{mnbo_std:.4f} "
-                f"| {gap_diff:.4f}±{gap_diff_std:.4f} "
-                f"| {reduction:.2f}%±{reduction_std:.2f}% "
-                f"| {best_config} "
+                f"| {_fmt(self.global_max)} "
+                f"| {_fmt(baseline_gap)} "
+                f"| {_fmt(mnbo_gap)} "
+                f"| {gap_diff_fmt} "
+                f"| {red_str} "
                 f"| {n_repeats} "
                 f"| {total_time:.1f} |\n"
             )

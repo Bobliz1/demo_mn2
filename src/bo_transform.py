@@ -47,9 +47,10 @@ class LogWarper(BaseOperator):
         return np.sign(y) * np.log1p(self.alpha * np.abs(y))
 
     def backward(self, y_prime):
-        # 数值稳定性：裁剪极端值，防止 exp() 溢出
-        y_prime = np.clip(y_prime, -700, 700)
-        return np.sign(y_prime) * ((np.exp(np.abs(y_prime)) - 1) / (self.alpha + 1e-12))
+        # 数值稳定性：clip 到 exp 安全范围（[-100, 100]）
+        y_prime = np.clip(y_prime, -100, 100)
+        alpha_safe = max(self.alpha, 1e-6)
+        return np.sign(y_prime) * ((np.exp(np.abs(y_prime)) - 1) / alpha_safe)
 
 
 class StandardScaler(BaseOperator):
@@ -170,39 +171,35 @@ class RankTransform(BaseOperator):
 
 
 # ---------------------------------------------------------------------------
-# 参数空间定义（外层维度 D = 12）
+# 参数空间定义（外层维度 D = 4，仅保留稳定算子）
 # ---------------------------------------------------------------------------
 # 外层参数向量含义：
-#   p[0]  → LogWarper 强度 g_log  ∈ [0,1]         （0=恒等）
-#   p[1]  → LogWarper alpha      ∈ [0.1, 10.0]   （连续形态参数）
-#   p[2]  → StandardScaler 强度 g_scl ∈ [0,1]
-#   p[3]  → StandardScaler shift ∈ [-1.0, 1.0]σ
-#   p[4]  → StandardScaler s     ∈ [0.2, 5.0]
-#   p[5]  → PowerTransform 强度 g_pow ∈ [0,1]
-#   p[6]  → PowerTransform power  ∈ [-1.0, 3.0]
-#   p[7]  → SigmoidWarper 强度 g_sig ∈ [0,1]
-#   p[8]  → SigmoidWarper k    ∈ [0.01, 10.0]
-#   p[9]  → SigmoidWarper c    ∈ [-5.0, 5.0]σ
-#   p[10] → MinMaxScaler 强度 g_mm  ∈ [0,1]
-#   p[11] → RankTransform 启用 gate ∈ [0,1]      （离散，0=禁用，1=启用）
+#   p[0]  → StandardScaler 强度 g_scl ∈ [0,1]
+#   p[1]  → StandardScaler shift ∈ [-1.0, 1.0]σ
+#   p[2]  → StandardScaler s     ∈ [0.2, 5.0]
+#   p[3]  → MinMaxScaler 强度 g_mm  ∈ [0,1]
+#
+# 【待处理算子】以下算子因数值稳定性问题已注释，待架构重构后恢复：
+#   LogWarper (p[0,1]) / PowerTransform (p[5,6]) / SigmoidWarper (p[7,8,9]) / RankTransform (p[11])
 
 PARAM_SPEC = [
     # (维度索引, 名称,              物理最小, 物理最大,     是否为强度 gate)
-    (0,  "log_gate",       0.0,    1.0,    True),   # g_log
-    (1,  "log_alpha",      0.1,   10.0,   False),  # alpha
-    (2,  "scl_gate",       0.0,    1.0,    True),   # g_scl
-    (3,  "scl_shift",     -1.0,    1.0,   False),  # shift (σ 单位)
-    (4,  "scl_scale",      0.2,    5.0,   False),  # scale
-    (5,  "pow_gate",       0.0,    1.0,    True),   # g_pow
-    (6,  "pow_power",     -1.0,    3.0,   False),  # power
-    (7,  "sig_gate",       0.0,    1.0,    True),   # g_sig
-    (8,  "sig_steep",      0.01,  10.0,   False),  # k
-    (9,  "sig_center",    -5.0,    5.0,   False),  # c (σ 单位)
-    (10, "mm_gate",        0.0,    1.0,    True),   # g_mm
-    (11, "rank_gate",      0.0,    1.0,    True),   # rank 离散 gate
+    (0,  "scl_gate",       0.0,    1.0,    True),   # g_scl
+    (1,  "scl_shift",     -1.0,    1.0,   False),  # shift (σ 单位)
+    (2,  "scl_scale",      0.2,    5.0,   False),  # scale
+    (3,  "mm_gate",        0.0,    1.0,    True),   # g_mm
+    # -- 以下为待处理算子（数值稳定性风险），已禁用 --
+    # (0,  "log_gate",       0.0,    1.0,    True),   # g_log
+    # (1,  "log_alpha",      0.1,   10.0,   False),  # alpha
+    # (5,  "pow_gate",       0.0,    1.0,    True),   # g_pow
+    # (6,  "pow_power",     -1.0,    3.0,   False),  # power
+    # (7,  "sig_gate",       0.0,    1.0,    True),   # g_sig
+    # (8,  "sig_steep",      0.01,  10.0,   False),  # k
+    # (9,  "sig_center",    -5.0,    5.0,   False),  # c (σ 单位)
+    # (11, "rank_gate",      0.0,    1.0,    True),   # rank 离散 gate
 ]
 
-N_CONTINUOUS = len(PARAM_SPEC)  # = 12
+N_CONTINUOUS = len(PARAM_SPEC)  # = 4（稳定算子模式）
 
 
 def _map(idx: int, p: float) -> float:
@@ -251,16 +248,15 @@ class WrappedTarget:
 
 def params_to_pipeline(params: np.ndarray, y_init: np.ndarray):
     """
-    将外层参数向量 params ∈ [0,1]^12 映射为 TransformerPipeline。
+    将外层参数向量 params ∈ [0,1]^4 映射为 TransformerPipeline。
+    【稳定算子模式】仅启用 StandardScaler + MinMaxScaler，其余算子已注释。
 
     策略：
     - 每个带 gate 的算子：gate > 0.01 时实例化，否则跳过（→ 恒等）
-    - 所有算子按固定顺序串联：Log → Scl → Pow → Sig → MinMax → Rank
-    - 算子强度通过 forward() 输出的缩放隐式控制（不改变 forward 本身，
-      强度控制的是「是否应用」，但形态参数保持）
+    - 算子按固定顺序串联：Scl → MinMax
 
     参数：
-        params : np.ndarray  shape=(12,)，每个分量 ∈ [0,1]
+        params : np.ndarray  shape=(4,)，每个分量 ∈ [0,1]
         y_init : np.ndarray  内层 BO 的初始观测，用于 StandardScaler 等
 
     返回：
@@ -270,47 +266,45 @@ def params_to_pipeline(params: np.ndarray, y_init: np.ndarray):
     ops = []
     config_parts = []
 
-    # ---- LogWarper ----
-    g_log = float(p[0])
-    if g_log > 0.01:
-        alpha = _map(1, float(p[1]))
-        ops.append(LogWarper(alpha))
-        config_parts.append(f"Log(g={g_log:.2f},α={alpha:.2f})")
-
     # ---- StandardScaler ----
-    g_scl = float(p[2])
+    g_scl = float(p[0])
     if g_scl > 0.01:
-        shift = _map(3, float(p[3]))
-        scale = _map(4, float(p[4]))
+        shift = _map(1, float(p[1]))
+        scale = _map(2, float(p[2]))
         ops.append(StandardScaler(y_init, shift, scale))
         config_parts.append(f"Scaler(g={g_scl:.2f},s={scale:.2f})")
 
-    # ---- PowerTransform ----
-    g_pow = float(p[5])
-    if g_pow > 0.01:
-        power = _map(6, float(p[6]))
-        ops.append(PowerTransform(power))
-        config_parts.append(f"Power(g={g_pow:.2f},p={power:.2f})")
-
-    # ---- SigmoidWarper ----
-    g_sig = float(p[7])
-    if g_sig > 0.01:
-        k = _map(8, float(p[8]))
-        c = _map(9, float(p[9]))
-        ops.append(SigmoidWarper(k, c))
-        config_parts.append(f"Sigmoid(g={g_sig:.2f},k={k:.2f})")
-
     # ---- MinMaxScaler ----
-    g_mm = float(p[10])
+    g_mm = float(p[3])
     if g_mm > 0.01:
         ops.append(MinMaxScaler(y_init, target_high=1.0))
         config_parts.append(f"MinMax(g={g_mm:.2f})")
 
+    # 【待处理算子】以下算子因数值稳定性问题已注释，待架构重构后恢复：
+    # ---- LogWarper ----
+    # g_log = float(p[0])
+    # if g_log > 0.01:
+    #     alpha = _map(1, float(p[1]))
+    #     ops.append(LogWarper(alpha))
+    #     config_parts.append(f"Log(g={g_log:.2f},α={alpha:.2f})")
+    # ---- PowerTransform ----
+    # g_pow = float(p[5])
+    # if g_pow > 0.01:
+    #     power = _map(6, float(p[6]))
+    #     ops.append(PowerTransform(power))
+    #     config_parts.append(f"Power(g={g_pow:.2f},p={power:.2f})")
+    # ---- SigmoidWarper ----
+    # g_sig = float(p[7])
+    # if g_sig > 0.01:
+    #     k = _map(8, float(p[8]))
+    #     c = _map(9, float(p[9]))
+    #     ops.append(SigmoidWarper(k, c))
+    #     config_parts.append(f"Sigmoid(g={g_sig:.2f},k={k:.2f})")
     # ---- RankTransform ----
-    g_rank = float(p[11])
-    if g_rank > 0.5:  # 离散门控：阈值 0.5
-        ops.append(RankTransform(y_init))
-        config_parts.append("Rank(启用)")
+    # g_rank = float(p[11])
+    # if g_rank > 0.5:
+    #     ops.append(RankTransform(y_init))
+    #     config_parts.append("Rank(启用)")
 
     pipe = TransformerPipeline(ops)
     config_str = ", ".join(config_parts) if config_parts else "Identity"
@@ -318,24 +312,26 @@ def params_to_pipeline(params: np.ndarray, y_init: np.ndarray):
 
 
 def get_outer_bounds() -> np.ndarray:
-    """返回外层连续搜索空间边界，shape=(12, 2)。"""
+    """返回外层连续搜索空间边界，shape=(D, 2)，D = N_CONTINUOUS。"""
     return np.array([[0.0, 1.0]] * N_CONTINUOUS)
 
 
 # ---------------------------------------------------------------------------
-# 算子一览
+# 算子一览（稳定算子模式）
 # ---------------------------------------------------------------------------
 OPERATOR_INFO = {
-    "log_gate":   ("LogWarper",       "g ∈ [0,1]",        "强度，0=恒等"),
-    "log_alpha":  ("LogWarper",       "α ∈ [0.1, 10.0]",  "对数压缩强度"),
+    # 【当前启用】稳定算子（线性变换，无数值溢出风险）
     "scl_gate":   ("StandardScaler",  "g ∈ [0,1]",        "强度，0=恒等"),
     "scl_shift":  ("StandardScaler",  "shift ∈ [-1σ, 1σ]","均值偏移"),
     "scl_scale":  ("StandardScaler",  "s ∈ [0.2, 5.0]",   "方差缩放"),
-    "pow_gate":   ("PowerTransform",  "g ∈ [0,1]",        "强度，0=恒等"),
-    "pow_power":  ("PowerTransform",  "p ∈ [-1, 3]",      "幂指数"),
-    "sig_gate":   ("SigmoidWarper",   "g ∈ [0,1]",        "强度，0=恒等"),
-    "sig_steep":  ("SigmoidWarper",   "k ∈ [0.01, 10.0]","陡度"),
-    "sig_center": ("SigmoidWarper",   "c ∈ [-5σ, 5σ]",    "中心"),
     "mm_gate":    ("MinMaxScaler",    "g ∈ [0,1]",        "强度，0=恒等"),
-    "rank_gate":  ("RankTransform",    "g ∈ [0,1]",        "离散gate，>0.5启用"),
+    # 【待处理】以下算子因数值稳定性问题已禁用，待架构重构后恢复：
+    # "log_gate":   ("LogWarper",       "g ∈ [0,1]",        "强度，0=恒等"),
+    # "log_alpha":  ("LogWarper",       "α ∈ [0.1, 10.0]",  "对数压缩强度"),
+    # "pow_gate":   ("PowerTransform",  "g ∈ [0,1]",        "强度，0=恒等"),
+    # "pow_power":  ("PowerTransform",  "p ∈ [-1, 3]",      "幂指数"),
+    # "sig_gate":   ("SigmoidWarper",   "g ∈ [0,1]",        "强度，0=恒等"),
+    # "sig_steep":  ("SigmoidWarper",   "k ∈ [0.01, 10.0]","陡度"),
+    # "sig_center": ("SigmoidWarper",   "c ∈ [-5σ, 5σ]",    "中心"),
+    # "rank_gate":  ("RankTransform",    "g ∈ [0,1]",        "离散gate，>0.5启用"),
 }
