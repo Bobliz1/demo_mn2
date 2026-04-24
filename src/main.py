@@ -153,7 +153,7 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     base_gap = gmax - base_max
 
     # ---- MN-BO（连续参数空间）----
-    # 外层 GP：6D 空间，适当增大 length_scale
+    # 外层 GP：4D 空间，适当增大 length_scale
     meta_gpr = GaussianProcessRegressor(
         kernel=C(1.0) * RBF(np.ones(N_CONTINUOUS) * 0.5, length_scale_bounds=(0.1, 2.0)),
         n_restarts_optimizer=5,
@@ -485,6 +485,10 @@ if __name__ == "__main__":
     print(f"\n将运行 {len(chosen)} 个函数（每个 {_R} 次取均值）：{chosen}")
     print(f"外层搜索空间：{N_CONTINUOUS}D  |  初始 {_IM} 点  |  "
           f"M={_M}（外层迭代） × N={_N}（内层步数）")
+
+    # 批量实验前清空旧汇总报告，避免追加污染
+    if os.path.exists(SUMMARY_PATH):
+        os.remove(SUMMARY_PATH)
 
     t_total = time.time()
     results = {}

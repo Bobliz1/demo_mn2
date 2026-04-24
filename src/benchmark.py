@@ -210,8 +210,8 @@ class ExperimentLogger:
         write_header = not os.path.exists(summary_path)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Gap 缩减比格式化（inf/NaN → N/A，mnbo_gap<0 视为溢出 → N/A）
-        if not math.isfinite(reduction) or mnbo_gap < 0 or gap_diff < 0:
+        # Gap 缩减比格式化（inf/NaN → N/A；gap_diff<0 说明 MN-BO 更差 → N/A）
+        if not math.isfinite(reduction) or gap_diff < 0:
             red_str = "N/A"
         else:
             red_str = f"{_fmt(reduction)}%"
