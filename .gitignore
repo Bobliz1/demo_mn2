@@ -32,3 +32,6 @@ package-lock.json
 # OS
 .DS_Store
 Thumbs.db
+
+# WorkBuddy AI 工作记忆（自动生成，勿纳入 git）
+.workbuddy/
