@@ -8,7 +8,7 @@ class ValleyRidge(BenchmarkFunc):
     难点：BO 被 V 谷的陡峭梯度拉走，山脊处平坦导致 EI 低而难被发现。
     """
     name       = "valley_ridge_func"
-    global_max = 6.0
+    global_max = 6.1267
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

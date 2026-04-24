@@ -54,6 +54,10 @@ python src/main.py cliff_func -R 1 -M 5 -N 8 -I 8
 # 快速验证（全部 12 个函数，单次重复）
 python src/main.py --all -R 1 -M 5 -N 8 -I 8
 
+# 指定随机种子（保证实验可复现）
+python src/main.py --all --seed 42
+python src/main.py multipeak_func --seed 100
+
 # 完整实验（需显式指定旧默认参数）
 python src/main.py --all -R 5 -M 20 -N 12 -I 36
 ```

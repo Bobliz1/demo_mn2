@@ -8,7 +8,7 @@ class PeriodicTrap(BenchmarkFunc):
     难点：背景振荡与全局峰在幅度上接近，EI 极易被周期局部极值吸走。
     """
     name       = "periodic_trap_func"
-    global_max = 7.0
+    global_max = 6.8413
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

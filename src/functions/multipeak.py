@@ -8,7 +8,7 @@ class MultiPeak(BenchmarkFunc):
     难点：较高的次优峰 (x≈0, height≈4) 极易被提前收敛。
     """
     name       = "multipeak_func"
-    global_max = 5.0
+    global_max = 5.7323
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

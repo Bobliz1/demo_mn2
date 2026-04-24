@@ -8,7 +8,7 @@ class Asymmetric(BenchmarkFunc):
     难点：左右梯度差异极大，GP 长度尺度难以均衡；真正最大值位于分段点附近。
     """
     name       = "asymmetric_func"
-    global_max = 10.0
+    global_max = 8.6597
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

@@ -229,12 +229,14 @@ def run_experiment(func_name: str,
                    m_outer: int = M_OUTER,
                    n_inner: int = N_INNER,
                    xi: float    = XI,
-                   n_repeats: int = N_REPEATS):
+                   n_repeats: int = N_REPEATS,
+                   summary_path: str = SUMMARY_PATH,
+                   seed_base: int = 42):
     """对单个函数运行 n_repeats 次独立实验，取均值输出报告。"""
 
     func_obj = get_func(func_name)
     gmax     = func_obj.global_max
-    seeds    = list(range(42, 42 + n_repeats))
+    seeds    = list(range(seed_base, seed_base + n_repeats))
 
     # 打印外层参数维度说明
     param_names = list(OPERATOR_INFO.keys())
@@ -346,7 +348,7 @@ def run_experiment(func_name: str,
         fig=fig,
     )
     logger.append_summary_row(
-        SUMMARY_PATH,
+        summary_path,
         baseline_gap=avg_base, baseline_std=std_base,
         mnbo_gap=avg_mnbo, mnbo_std=std_mnbo,
         gap_diff=avg_diff, gap_diff_std=std_diff,
@@ -445,6 +447,10 @@ if __name__ == "__main__":
         "-I", "--init-meta", type=int, default=None,
         help=f"外层初始拉丁超方点数（默认：{N_INIT_META}）"
     )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="随机种子基值（默认：42）"
+    )
     args = parser.parse_args()
 
     # ---- 覆盖全局参数 ----
@@ -486,14 +492,17 @@ if __name__ == "__main__":
     print(f"外层搜索空间：{N_CONTINUOUS}D  |  初始 {_IM} 点  |  "
           f"M={_M}（外层迭代） × N={_N}（内层步数）")
 
-    # 批量实验前清空旧汇总报告，避免追加污染
-    if os.path.exists(SUMMARY_PATH):
-        os.remove(SUMMARY_PATH)
+    # 批量实验生成带时间戳的汇总报告，保留历史
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary_path = os.path.join("results", f"summary_report_{ts}.md")
 
+    _SEED = args.seed
     t_total = time.time()
     results = {}
     for name in chosen:
-        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R)
+        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R,
+                           summary_path=summary_path, seed_base=_SEED)
         results[name] = r
 
     # 最终汇总打印
@@ -510,4 +519,4 @@ if __name__ == "__main__":
               f"{r['avg_gap_diff']:.4f}±{r['std_gap_diff']:.4f}  "
               f"{r['avg_reduction']:.1f}%±{r['std_reduction']:.1f}%")
     print(f"\n  总耗时: {time.time()-t_total:.1f}s")
-    print(f"  汇总报告：{SUMMARY_PATH}")
+    print(f"  汇总报告：{summary_path}")

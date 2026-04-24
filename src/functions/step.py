@@ -8,7 +8,7 @@ class Step(BenchmarkFunc):
     难点：不连续目标完全违背 GP 的平滑性假设；跳变处方差爆炸导致过度探索。
     """
     name       = "step_func"
-    global_max = 5.0
+    global_max = 5.1
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

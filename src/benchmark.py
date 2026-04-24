@@ -38,9 +38,7 @@ def _fmt(val, sig=3):
         return "nan"
     if math.isinf(float_val):
         return "inf" if float_val > 0 else "-inf"
-    if float_val < 0:
-        # 负值表示 backward 溢出（找到的值超过理论最大）→ 非合法结果
-        return "N/A"
+    # 负值允许显示（噪声或理论最大值估计偏差可能导致 found_max > global_max）
 
     abs_val = float_val
     if abs_val >= 1e4 or (abs_val != 0 and abs_val < 1e-3):
@@ -175,8 +173,8 @@ class ExperimentLogger:
             f.write(f"| 基线 Gap | {_fmt(baseline_gap)} |\n")
             f.write(f"| MN-BO Gap | {_fmt(mnbo_gap)} |\n")
             f.write(f"| Gap 缩减差值 | {_fmt_gap_diff(gap_diff_avg, baseline_gap)} |\n")
-            # Gap 缩减比：仅当分母有意义且 mnbo_gap>=0 时才计算
-            red_str = f"{_fmt(reduction_avg)}%" if (math.isfinite(reduction_avg) and mnbo_gap >= 0) else "N/A"
+            # Gap 缩减比：分母有意义即可计算（允许负 gap 情况）
+            red_str = f"{_fmt(reduction_avg)}%" if math.isfinite(reduction_avg) else "N/A"
             f.write(f"| Gap 缩减比 | {red_str} |\n")
             f.write(f"\n- **最佳变换配置**：{best_config}\n\n")
 

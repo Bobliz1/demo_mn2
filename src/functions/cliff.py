@@ -8,7 +8,7 @@ class Cliff(BenchmarkFunc):
     难点：GP 平滑假设在不连续点处严重失效；跳降点两侧采样会导致极大预测误差。
     """
     name       = "cliff_func"
-    global_max = 8.0
+    global_max = 8.1979
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):
