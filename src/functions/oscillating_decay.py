@@ -8,7 +8,7 @@ class OscillatingDecay(BenchmarkFunc):
     难点：GP 长度尺度需同时适配慢包络和快振荡；远端峰幅度接近使 EI 难以聚焦。
     """
     name       = "oscillating_decay_func"
-    global_max = 3.5
+    global_max = 3.5141
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

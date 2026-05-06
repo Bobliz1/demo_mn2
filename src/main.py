@@ -145,13 +145,17 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
 
     outer_bounds = get_outer_bounds()
 
+    # ---- 采样预算对齐 ----
+    # MN-BO 除共享初始点外，还会执行的额外采样数
+    total_budget = (N_INIT_META + m_outer) * n_inner
+
     # ---- 基线 BO ----
+    # 赋予基线 BO 同等于 MN-BO 总开销的采样预算，确保绝对公平
+    print(f"      [基线 BO] 分配公平采样预算: {total_budget} 步")
     base_max, x_base, y_base, gpr_base = run_inner_bo(
         TransformerPipeline([IdentityOperator()]),
-        func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax,
+        func_obj, total_budget, X_init, Y_init, bounds, gmax=gmax,
     )
-    base_gap = gmax - base_max
-
     # ---- MN-BO（连续参数空间）----
     # 外层 GP：4D 空间，适当增大 length_scale
     meta_gpr = GaussianProcessRegressor(
@@ -173,7 +177,7 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     # 外层初始点：拉丁超方采样
     X_meta_init = _latin_hypercube_init(N_INIT_META, N_CONTINUOUS, seed=seed)
     X_meta, Y_meta = [], []
-    best_pipe, best_pipe_str, min_gap = None, "", np.inf
+    best_pipe, best_pipe_str, max_found = None, "", -np.inf
     final_data = None
 
     print(f"      [外层预填充 {N_INIT_META} 个初始点...]")
@@ -182,14 +186,13 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
         pipe, ps = params_to_pipeline(init_pt, Y_init)
         found, xs, ys, lgpr = run_inner_bo(
             pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
-        gap = gmax - found
         X_meta.append(init_pt)
-        Y_meta.append(gap)
-        if gap < min_gap:
-            min_gap, best_pipe, best_pipe_str = gap, pipe, ps
+        Y_meta.append(-found)  # 外层 GP 最小化 -found
+        if found > max_found:
+            max_found, best_pipe, best_pipe_str = found, pipe, ps
             final_data = (xs, ys, lgpr)
         if (i + 1) % 4 == 0:
-            print(f"      初始点 {i+1}/{N_INIT_META} 完成  当前最佳 Gap={min_gap:.6f}")
+            print(f"      初始点 {i+1}/{N_INIT_META} 完成  当前最佳 Max={max_found:.6f}")
 
     # 外层 GP 搜索（连续优化）
     for m in range(m_outer):
@@ -202,16 +205,15 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
         print(f"      外层 GP {m+1}/{m_outer}  最佳配置: {ps[:60]}...")
         found, xs, ys, lgpr = run_inner_bo(
             pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
-        gap = gmax - found
         X_meta.append(params)
-        Y_meta.append(gap)
-        if gap < min_gap:
-            min_gap, best_pipe, best_pipe_str = gap, pipe, ps
+        Y_meta.append(-found)
+        if found > max_found:
+            max_found, best_pipe, best_pipe_str = found, pipe, ps
             final_data = (xs, ys, lgpr)
 
     return {
-        "base_gap":    base_gap,
-        "mnbo_gap":    min_gap,
+        "base_max":    base_max,
+        "mnbo_max":    max_found,
         "best_config": best_pipe_str,
         "x_base":      x_base,
         "y_base":      y_base,
@@ -242,7 +244,8 @@ def run_experiment(func_name: str,
     param_names = list(OPERATOR_INFO.keys())
     print(f"\n{'='*60}")
     print(f"  函数: {func_name}  |  理论最大值: {gmax}")
-    print(f"  外层维度: {N_CONTINUOUS}D  |  外层 M={m_outer}  内层 N={n_inner}")
+    total_budget = (N_INIT_META + m_outer) * n_inner
+    print(f"  外层维度: {N_CONTINUOUS}D  |  外层 M={m_outer}  内层 N={n_inner}  |  基线 BO 预算: {total_budget}")
     print(f"  外层参数:")
     for k, (op, rng, desc) in OPERATOR_INFO.items():
         print(f"    [{k}] {op}  {rng}  — {desc}")
@@ -255,61 +258,55 @@ def run_experiment(func_name: str,
         print(f"\n  ── 第 {i+1}/{n_repeats} 次（seed={seed}）──")
         r = _single_run(func_obj, m_outer, n_inner, xi, seed)
         run_results.append(r)
-        red = ((r["base_gap"] - r["mnbo_gap"]) / r["base_gap"] * 100
-               if r["base_gap"] > 0 else float("nan"))
-        print(f"     基线 Gap={r['base_gap']:.6f}  "
-              f"MN-BO Gap={r['mnbo_gap']:.6f}  "
-              f"缩减比: {red:.1f}%")
+        print(f"     基线 Max={r['base_max']:.6f}  "
+              f"MN-BO Max={r['mnbo_max']:.6f}")
 
     # ---- 统计汇总 ----
-    base_gaps  = np.array([r["base_gap"]  for r in run_results])
-    mnbo_gaps  = np.array([r["mnbo_gap"]  for r in run_results])
-    reductions = (base_gaps - mnbo_gaps) / base_gaps * 100
-    gap_diffs  = base_gaps - mnbo_gaps
+    base_maxes = np.array([r["base_max"]  for r in run_results])
+    mnbo_maxes = np.array([r["mnbo_max"]  for r in run_results])
+    max_diffs  = mnbo_maxes - base_maxes
 
-    avg_base, std_base = base_gaps.mean(), base_gaps.std()
-    avg_mnbo, std_mnbo = mnbo_gaps.mean(), mnbo_gaps.std()
-    avg_red,  std_red  = reductions.mean(), reductions.std()
-    avg_diff, std_diff = gap_diffs.mean(), gap_diffs.std()
+    avg_base, std_base = base_maxes.mean(), base_maxes.std()
+    avg_mnbo, std_mnbo = mnbo_maxes.mean(), mnbo_maxes.std()
+    avg_diff, std_diff = max_diffs.mean(), max_diffs.std()
 
     print(f"\n{'─'*60}")
     print(f"  汇总（{n_repeats} 次均值）")
-    print(f"  基线 Gap    : {avg_base:.6f} ± {std_base:.6f}")
-    print(f"  MN-BO Gap   : {avg_mnbo:.6f} ± {std_mnbo:.6f}")
-    print(f"  Gap 缩减差值: {avg_diff:.6f} ± {std_diff:.6f}")
-    print(f"  Gap 缩减比  : {avg_red:.2f}% ± {std_red:.2f}%")
+    print(f"  基线 Max    : {avg_base:.6f} ± {std_base:.6f}")
+    print(f"  MN-BO Max   : {avg_mnbo:.6f} ± {std_mnbo:.6f}")
+    print(f"  Max 差值    : {avg_diff:.6f} ± {std_diff:.6f} (正数优)")
     print(f"{'─'*60}")
 
-    # ---- 选取表现最接近均值的一次，绘制可视化 ----
-    median_idx = np.argmin(np.abs(mnbo_gaps - mnbo_gaps.mean()))
+    # ---- 选出中位次绘图 ----
+    median_idx = np.argmin(np.abs(mnbo_maxes - mnbo_maxes.mean()))
     best_run   = run_results[median_idx]
-
-    xs_f, ys_f, gpr_f = best_run["final_data"]
+    
+    x_base, y_base     = best_run["x_base"], best_run["y_base"]
     gpr_base           = best_run["gpr_base"]
-    x_base             = best_run["x_base"]
-    y_base             = best_run["y_base"]
+    xs_best, ys_best   = best_run["final_data"][0], best_run["final_data"][1]
+    gpr_best           = best_run["final_data"][2]
+    med_base_max       = best_run["base_max"]
+    med_mnbo_max       = best_run["mnbo_max"]
     best_pipe          = best_run["best_pipe"]
     best_pipe_str      = best_run["best_config"]
-    med_base_gap       = best_run["base_gap"]
-    med_mnbo_gap       = best_run["mnbo_gap"]
     bounds             = func_obj.np_bounds()
 
     x_plot = np.linspace(bounds[0, 0], bounds[0, 1], 1000).reshape(-1, 1)
     y_gt   = func_obj(x_plot.flatten())
 
     mu_base, _  = gpr_base.predict(x_plot, return_std=True)
-    mu_trans, _ = gpr_f.predict(x_plot, return_std=True)
+    mu_trans, _ = gpr_best.predict(x_plot, return_std=True)
     mu_raw      = np.array(
         [best_pipe.backward(np.array([[v]])) for v in mu_trans.flatten()]
     ).flatten()
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    for ax, mu, xs, ys, title, gap_val in [
-        (ax1, mu_base, x_base, y_base.flatten(),
-         f"Baseline BO\n(Gap={med_base_gap:.4f})", med_base_gap),
-        (ax2, mu_raw,  xs_f,   ys_f.flatten(),
-         f"MN-BO  \n(Gap={med_mnbo_gap:.4f})", med_mnbo_gap),
+    
+    for ax, mu, xs, ys, title, max_val in [
+        (ax1, mu_base, x_base, y_base, 
+         f"Baseline BO\n(Max={med_base_max:.4f})", med_base_max),
+        (ax2, mu_raw, xs_best, ys_best, 
+         f"MN-BO  \n(Max={med_mnbo_max:.4f})", med_mnbo_max),
     ]:
         ax.plot(x_plot, y_gt,   "r:", lw=1.5, label="Ground Truth", alpha=0.85)
         ax.plot(x_plot, mu,     "b-", lw=1.5, label="GP Mean",      alpha=0.85)
@@ -321,50 +318,39 @@ def run_experiment(func_name: str,
         ax.set_ylabel("f(x)")
         ax.legend(fontsize=8)
 
-    # 截断 best_pipe_str 避免标题过长
-    pipe_short = best_pipe_str[:80] + ("..." if len(best_pipe_str) > 80 else "")
-    plt.suptitle(
-        f"{func_name}  |  {n_repeats} runs avg  "
-        f"Baseline Gap={avg_base:.4f}±{std_base:.4f}  "
-        f"MN-BO Gap={avg_mnbo:.4f}±{std_mnbo:.4f}  "
-        f"(↓{avg_red:.1f}%)",
-        fontsize=10, fontweight="bold",
-    )
     plt.tight_layout()
 
     # ---- 写日志 ----
     logger  = ExperimentLogger(func_obj)
     md_path = logger.log_experiment(
         m_iter=m_outer, n_iter=n_inner, xi=xi,
-        baseline_gap=avg_base, mnbo_gap=avg_mnbo,
+        baseline_max=avg_base, mnbo_max=avg_mnbo,
         baseline_std=std_base, mnbo_std=std_mnbo,
-        gap_diff_avg=avg_diff, gap_diff_std=std_diff,
-        reduction_avg=avg_red, reduction_std=std_red,
+        max_diff_avg=avg_diff, max_diff_std=std_diff,
         n_repeats=n_repeats,
         best_config=best_pipe_str,
-        samples_x=xs_f, samples_y=ys_f,
-        best_x=float(xs_f[np.argmax(ys_f)][0]),
-        best_y=float(ys_f.max()),
+        samples_x=xs_best, samples_y=ys_best,
+        best_x=float(xs_best[np.argmax(ys_best)][0]),
+        best_y=float(ys_best.max()),
         fig=fig,
     )
     logger.append_summary_row(
         summary_path,
-        baseline_gap=avg_base, baseline_std=std_base,
-        mnbo_gap=avg_mnbo, mnbo_std=std_mnbo,
-        gap_diff=avg_diff, gap_diff_std=std_diff,
-        reduction=avg_red, reduction_std=std_red,
+        baseline_max=avg_base, baseline_std=std_base,
+        mnbo_max=avg_mnbo, mnbo_std=std_mnbo,
+        max_diff=avg_diff, max_diff_std=std_diff,
         best_config=best_pipe_str,
         n_repeats=n_repeats,
         total_time=0,
     )
     print(f"  报告已写入: {md_path}")
 
+    # 将平均结果返回，用于最后大汇总
     return {
-        "avg_base_gap": avg_base, "std_base_gap": std_base,
-        "avg_mnbo_gap": avg_mnbo, "std_mnbo_gap": std_mnbo,
-        "avg_reduction": avg_red, "std_reduction": std_red,
-        "avg_gap_diff": avg_diff, "std_gap_diff": std_diff,
-        "best_config": best_pipe_str,
+        "avg_base_max": avg_base, "std_base_max": std_base,
+        "avg_mnbo_max": avg_mnbo, "std_mnbo_max": std_mnbo,
+        "avg_max_diff": avg_diff, "std_max_diff": std_diff,
+        "total_time":   0
     }
 
 
@@ -505,18 +491,39 @@ if __name__ == "__main__":
                            summary_path=summary_path, seed_base=_SEED)
         results[name] = r
 
-    # 最终汇总打印
     print(f"\n\n{'#'*60}")
     print(f"  批量实验完成 — 汇总（{_R} 次均值）")
     print(f"{'#'*60}")
-    print(f"  {'函数':<28}  {'基线Gap':>14}  {'MN-BO Gap':>14}  "
-          f"{'Gap缩减差值':>14}  {'缩减比':>10}")
-    print(f"  {'─'*82}")
+    print(f"  {'函数':<28}  {'基线Max':>14}  {'MN-BO Max':>14}  "
+          f"{'Max差值(正优)':>14}")
+    print(f"  {'─'*72}")
+    
+    # 终端打印
     for name, r in results.items():
         print(f"  {name:<28}  "
-              f"{r['avg_base_gap']:.4f}±{r['std_base_gap']:.4f}  "
-              f"{r['avg_mnbo_gap']:.4f}±{r['std_mnbo_gap']:.4f}  "
-              f"{r['avg_gap_diff']:.4f}±{r['std_gap_diff']:.4f}  "
-              f"{r['avg_reduction']:.1f}%±{r['std_reduction']:.1f}%")
-    print(f"\n  总耗时: {time.time()-t_total:.1f}s")
-    print(f"  汇总报告：{summary_path}")
+              f"{r['avg_base_max']:.4f}±{r['std_base_max']:.4f}  "
+              f"{r['avg_mnbo_max']:.4f}±{r['std_mnbo_max']:.4f}  "
+              f"{r['avg_max_diff']:.4f}±{r['std_max_diff']:.4f}")
+              
+    total_time = time.time() - t_total
+    print(f"\n  总耗时: {total_time:.1f}s")
+    print(f"  累计汇总报告：{summary_path}")
+
+    # 生成带时间戳的批次汇总文件
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch_summary_path = f"results/batch_summary_{timestamp}.md"
+    os.makedirs("results", exist_ok=True)
+    with open(batch_summary_path, "w", encoding="utf-8") as f:
+        f.write(f"# 批量实验汇总报告\n\n")
+        f.write(f"- **生成时间**: {timestamp}\n")
+        f.write(f"- **参数配置**: M={_M}, N={_N}, 外层初始点={_IM}, 重复={_R}次\n")
+        f.write(f"- **基线BO预算**: {(_IM + _M) * _N} 步\n")
+        f.write(f"- **总耗时**: {total_time:.1f}s\n\n")
+        f.write("| 函数 | 基线 Max | MN-BO Max | Max 差值 |\n")
+        f.write("|------|-----------|-----------|--------------|\n")
+        for name, r in results.items():
+            f.write(f"| {name} | {r['avg_base_max']:.4f}±{r['std_base_max']:.4f} | "
+                    f"{r['avg_mnbo_max']:.4f}±{r['std_mnbo_max']:.4f} | "
+                    f"{r['avg_max_diff']:.4f}±{r['std_max_diff']:.4f} |\n")
+    print(f"  单次批次汇总：{batch_summary_path}")

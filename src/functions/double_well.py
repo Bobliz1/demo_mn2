@@ -8,7 +8,7 @@ class DoubleWell(BenchmarkFunc):
     难点：对称结构使 GP 无法区分两峰优劣；BO 常反复收敛到先采到的那个峰。
     """
     name       = "double_well_func"
-    global_max = 4.0
+    global_max = 3.9945
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

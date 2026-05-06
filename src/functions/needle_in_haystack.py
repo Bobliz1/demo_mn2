@@ -8,7 +8,7 @@ class NeedleInHaystack(BenchmarkFunc):
     难点：随机初始化几乎不可能命中极窄峰；GP 会将峰区域视为孤立噪声点。
     """
     name       = "needle_in_haystack_func"
-    global_max = 10.0
+    global_max = 10.0909
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

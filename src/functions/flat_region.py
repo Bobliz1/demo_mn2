@@ -8,7 +8,7 @@ class FlatRegion(BenchmarkFunc):
     难点：平坦区域采集信息量极低，GP 不确定度均匀，难以聚焦。
     """
     name       = "flat_region_func"
-    global_max = 3.0
+    global_max = 3.0010
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

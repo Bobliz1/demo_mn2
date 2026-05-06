@@ -7,7 +7,7 @@ class DeceptiveTrap(BenchmarkFunc):
     难点：宽局部峰 EI 持续高估，BO 反复落入陷阱。
     """
     name      = "deceptive_trap_func"
-    global_max = 4.9048
+    global_max = 4.9132
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):

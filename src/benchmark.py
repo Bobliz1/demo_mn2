@@ -137,10 +137,9 @@ class ExperimentLogger:
     def log_experiment(
         self, *,
         m_iter, n_iter, xi,
-        baseline_gap, mnbo_gap,
+        baseline_max, mnbo_max,
         baseline_std=0.0, mnbo_std=0.0,
-        gap_diff_avg=0.0, gap_diff_std=0.0,
-        reduction_avg=0.0, reduction_std=0.0,
+        max_diff_avg=0.0, max_diff_std=0.0,
         n_repeats=1,
         best_config,
         samples_x, samples_y,
@@ -170,12 +169,9 @@ class ExperimentLogger:
             f.write("| 指标 | 值 |\n")
             f.write("|------|----|\n")
             f.write(f"| 理论最大值 | {_fmt(self.global_max)} |\n")
-            f.write(f"| 基线 Gap | {_fmt(baseline_gap)} |\n")
-            f.write(f"| MN-BO Gap | {_fmt(mnbo_gap)} |\n")
-            f.write(f"| Gap 缩减差值 | {_fmt_gap_diff(gap_diff_avg, baseline_gap)} |\n")
-            # Gap 缩减比：分母有意义即可计算（允许负 gap 情况）
-            red_str = f"{_fmt(reduction_avg)}%" if math.isfinite(reduction_avg) else "N/A"
-            f.write(f"| Gap 缩减比 | {red_str} |\n")
+            f.write(f"| 基线 Max | {_fmt(baseline_max)} |\n")
+            f.write(f"| MN-BO Max | {_fmt(mnbo_max)} |\n")
+            f.write(f"| Max 差值 (正优) | {_fmt(max_diff_avg)} |\n")
             f.write(f"\n- **最佳变换配置**：{best_config}\n\n")
 
             # 2. 可视化
@@ -197,10 +193,9 @@ class ExperimentLogger:
 
     # ------------------------------------------------------------------
     def append_summary_row(self, summary_path: str, *,
-                           baseline_gap, baseline_std,
-                           mnbo_gap, mnbo_std,
-                           gap_diff, gap_diff_std,
-                           reduction, reduction_std,
+                           baseline_max, baseline_std,
+                           mnbo_max, mnbo_std,
+                           max_diff, max_diff_std,
                            best_config,
                            n_repeats,
                            total_time):
@@ -208,31 +203,24 @@ class ExperimentLogger:
         write_header = not os.path.exists(summary_path)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Gap 缩减比格式化（inf/NaN → N/A；gap_diff<0 说明 MN-BO 更差 → N/A）
-        if not math.isfinite(reduction) or gap_diff < 0:
-            red_str = "N/A"
-        else:
-            red_str = f"{_fmt(reduction)}%"
-        gap_diff_fmt = _fmt_gap_diff(gap_diff, baseline_gap)
 
         with open(summary_path, "a", encoding="utf-8") as f:
             if write_header:
                 f.write("# 实验汇总报告\n\n")
                 f.write(f"> **报告生成时间**：{now_str}\n\n")
-                f.write("| 函数 | 理论最大值 | 基线 Gap | MN-BO Gap"
-                        " | Gap 缩减差值 | Gap 缩减比 |"
+                f.write("| 函数 | 理论最大值 | 基线 Max | MN-BO Max"
+                        " | Max 差值 (正优) |"
                         " 重复次数 | 耗时(s) |\n")
                 f.write("|------|-----------|---------|----------|"
-                        "-------------|-----------|"
+                        "-------------|"
                         "--------|-------|\n")
 
             f.write(
                 f"| {self.func_name} "
                 f"| {_fmt(self.global_max)} "
-                f"| {_fmt(baseline_gap)} "
-                f"| {_fmt(mnbo_gap)} "
-                f"| {gap_diff_fmt} "
-                f"| {red_str} "
+                f"| {_fmt(baseline_max)} "
+                f"| {_fmt(mnbo_max)} "
+                f"| {_fmt(max_diff)} "
                 f"| {n_repeats} "
                 f"| {total_time:.1f} |\n"
             )
