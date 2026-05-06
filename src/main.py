@@ -512,8 +512,9 @@ if __name__ == "__main__":
     # 生成带时间戳的批次汇总文件
     import datetime
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    batch_summary_path = f"results/batch_summary_{timestamp}.md"
-    os.makedirs("results", exist_ok=True)
+    summary_dir = "results/summary"
+    os.makedirs(summary_dir, exist_ok=True)
+    batch_summary_path = f"{summary_dir}/batch_summary_{timestamp}.md"
     with open(batch_summary_path, "w", encoding="utf-8") as f:
         f.write(f"# 批量实验汇总报告\n\n")
         f.write(f"- **生成时间**: {timestamp}\n")
