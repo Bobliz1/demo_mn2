@@ -83,6 +83,7 @@ M_OUTER      = 5    # 外层迭代（12D 空间需要足够探索）
 N_INNER      = 8    # 内层迭代（略微降低，省时间给外层）
 XI           = 0.05
 N_INIT_META  = 8    # 外层初始拉丁超方采样点  现在是4D；
+N_EXPLOIT    = 20   # 阶段二：全量经验池终极冲刺步数
 
 
 # ======================================================================
@@ -132,7 +133,7 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=Non
 # 单次实验（一次 seed）
 # ======================================================================
 
-def _single_run(func_obj, m_outer, n_inner, xi, seed):
+def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
     """执行一次完整的基线 BO + MN-BO（连续参数），返回详细结果。"""
 
     bounds = func_obj.np_bounds()
@@ -146,8 +147,8 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     outer_bounds = get_outer_bounds()
 
     # ---- 采样预算对齐 ----
-    # MN-BO 除共享初始点外，还会执行的额外采样数
-    total_budget = (N_INIT_META + m_outer) * n_inner
+    # MN-BO 总采样数：阶段一(海选) + 阶段二(冲刺)
+    total_budget = (N_INIT_META + m_outer) * n_inner + n_exploit
 
     # ---- 基线 BO ----
     # 赋予基线 BO 同等于 MN-BO 总开销的采样预算，确保绝对公平
@@ -178,9 +179,12 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
     X_meta_init = _latin_hypercube_init(N_INIT_META, N_CONTINUOUS, seed=seed)
     X_meta, Y_meta = [], []
     best_pipe, best_pipe_str, max_found = None, "", -np.inf
-    final_data = None
+    
+    # 建立全局经验池 (Global Experience Pool)
+    global_X_pool = X_init.copy()
+    global_Y_pool = Y_init.copy()
 
-    print(f"      [外层预填充 {N_INIT_META} 个初始点...]")
+    print(f"      [MN-BO 阶段一] 算子海选开始，预填充 {N_INIT_META} 个点...")
 
     for i, init_pt in enumerate(X_meta_init):
         pipe, ps = params_to_pipeline(init_pt, Y_init)
@@ -188,9 +192,13 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
             pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
         X_meta.append(init_pt)
         Y_meta.append(-found)  # 外层 GP 最小化 -found
+        
+        # 收集本轮新采样的数据到全局经验池（跳过前 5 个初始点）
+        global_X_pool = np.vstack((global_X_pool, xs[n_init:]))
+        global_Y_pool = np.vstack((global_Y_pool, ys[n_init:]))
+        
         if found > max_found:
             max_found, best_pipe, best_pipe_str = found, pipe, ps
-            final_data = (xs, ys, lgpr)
         if (i + 1) % 4 == 0:
             print(f"      初始点 {i+1}/{N_INIT_META} 完成  当前最佳 Max={max_found:.6f}")
 
@@ -207,18 +215,33 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed):
             pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
         X_meta.append(params)
         Y_meta.append(-found)
+        
+        # 收集新采样数据到全局经验池
+        global_X_pool = np.vstack((global_X_pool, xs[n_init:]))
+        global_Y_pool = np.vstack((global_Y_pool, ys[n_init:]))
+        
         if found > max_found:
             max_found, best_pipe, best_pipe_str = found, pipe, ps
-            final_data = (xs, ys, lgpr)
+
+    # ---- MN-BO 阶段二：全量经验池终极爆发 ----
+    # 此时全局池已收集阶段一产生的所有废点和好点
+    pool_size = len(global_X_pool)
+    print(f"      [MN-BO 阶段二] 海选结束！最佳算子: {best_pipe_str[:40]}")
+    print(f"      带着 {pool_size} 个全局数据的巨型雪球，冲刺 {n_exploit} 步...")
+    
+    final_found, final_xs, final_ys, final_gpr = run_inner_bo(
+        best_pipe, func_obj, n_exploit, global_X_pool, global_Y_pool, bounds, gmax=gmax)
+        
+    mnbo_max = np.max(final_ys)
 
     return {
         "base_max":    base_max,
-        "mnbo_max":    max_found,
+        "mnbo_max":    mnbo_max,
         "best_config": best_pipe_str,
         "x_base":      x_base,
         "y_base":      y_base,
         "gpr_base":    gpr_base,
-        "final_data":  final_data,
+        "final_data":  (final_xs, final_ys, final_gpr),
         "best_pipe":   best_pipe,
     }
 
@@ -232,6 +255,7 @@ def run_experiment(func_name: str,
                    n_inner: int = N_INNER,
                    xi: float    = XI,
                    n_repeats: int = N_REPEATS,
+                   n_exploit: int = N_EXPLOIT,
                    summary_path: str = SUMMARY_PATH,
                    seed_base: int = 42):
     """对单个函数运行 n_repeats 次独立实验，取均值输出报告。"""
@@ -244,8 +268,8 @@ def run_experiment(func_name: str,
     param_names = list(OPERATOR_INFO.keys())
     print(f"\n{'='*60}")
     print(f"  函数: {func_name}  |  理论最大值: {gmax}")
-    total_budget = (N_INIT_META + m_outer) * n_inner
-    print(f"  外层维度: {N_CONTINUOUS}D  |  外层 M={m_outer}  内层 N={n_inner}  |  基线 BO 预算: {total_budget}")
+    total_budget = (N_INIT_META + m_outer) * n_inner + n_exploit
+    print(f"  外层维度: {N_CONTINUOUS}D  |  外层 M={m_outer}  内层 N={n_inner}  阶段二={n_exploit} |  总预算: {total_budget}")
     print(f"  外层参数:")
     for k, (op, rng, desc) in OPERATOR_INFO.items():
         print(f"    [{k}] {op}  {rng}  — {desc}")
@@ -256,7 +280,7 @@ def run_experiment(func_name: str,
     run_results = []
     for i, seed in enumerate(seeds):
         print(f"\n  ── 第 {i+1}/{n_repeats} 次（seed={seed}）──")
-        r = _single_run(func_obj, m_outer, n_inner, xi, seed)
+        r = _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit)
         run_results.append(r)
         print(f"     基线 Max={r['base_max']:.6f}  "
               f"MN-BO Max={r['mnbo_max']:.6f}")
@@ -434,6 +458,10 @@ if __name__ == "__main__":
         help=f"外层初始拉丁超方点数（默认：{N_INIT_META}）"
     )
     parser.add_argument(
+        "-E", "--exploit-iters", type=int, default=None,
+        help=f"阶段二终极冲刺步数（默认：{N_EXPLOIT}）"
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="随机种子基值（默认：42）"
     )
@@ -448,14 +476,17 @@ if __name__ == "__main__":
         globals()["N_REPEATS"] = args.repeats
     if args.init_meta is not None:
         globals()["N_INIT_META"] = args.init_meta
+    if args.exploit_iters is not None:
+        globals()["N_EXPLOIT"] = args.exploit_iters
 
     # 打印当前生效的参数（从 globals 读取，确保一致）
     _M  = globals()["M_OUTER"]
     _N  = globals()["N_INNER"]
+    _E  = globals()["N_EXPLOIT"]
     _R  = globals()["N_REPEATS"]
     _IM = globals()["N_INIT_META"]
     print(f"\n生效参数：M={_M}（外层迭代） × N={_N}（内层步数） × "
-          f"初始点={_IM} × 重复={_R}次")
+          f"初始点={_IM} × 冲刺={_E}步 × 重复={_R}次")
 
     # ---- 确定要运行的函数 ----
     all_funcs = list_functions()
@@ -487,7 +518,7 @@ if __name__ == "__main__":
     t_total = time.time()
     results = {}
     for name in chosen:
-        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R,
+        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R, n_exploit=_E,
                            summary_path=summary_path, seed_base=_SEED)
         results[name] = r
 
@@ -516,10 +547,10 @@ if __name__ == "__main__":
     os.makedirs(summary_dir, exist_ok=True)
     batch_summary_path = f"{summary_dir}/batch_summary_{timestamp}.md"
     with open(batch_summary_path, "w", encoding="utf-8") as f:
-        f.write(f"# 批量实验汇总报告\n\n")
+        f.write(f"# 批量实验汇总报告（两阶段火箭法）\n\n")
         f.write(f"- **生成时间**: {timestamp}\n")
-        f.write(f"- **参数配置**: M={_M}, N={_N}, 外层初始点={_IM}, 重复={_R}次\n")
-        f.write(f"- **基线BO预算**: {(_IM + _M) * _N} 步\n")
+        f.write(f"- **参数配置**: 外层M={_M}, 内层N={_N}, 外层初始点={_IM}, 冲刺E={_E}, 重复={_R}次\n")
+        f.write(f"- **基线/MN-BO总预算**: {(_IM + _M) * _N + _E} 步\n")
         f.write(f"- **总耗时**: {total_time:.1f}s\n\n")
         f.write("| 函数 | 基线 Max | MN-BO Max | Max 差值 |\n")
         f.write("|------|-----------|-----------|--------------|\n")
