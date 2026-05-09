@@ -1,39 +1,40 @@
 """main.py
-MN-BO 实验入口（连续参数化版本 v2，带 gate）。
+MN-BO 实验入口（滚雪球多视角搜索版本 v3.2）。
 
-【稳定算子模式】外层在 4 维连续空间 [0,1]^4 搜索最优变换配置：
-  p[0]  → StandardScaler 强度 g ∈ [0,1]
-  p[1]  → StandardScaler shift ∈ [-1σ, 1σ]
-  p[2]  → StandardScaler scale ∈ [0.2, 5.0]
-  p[3]  → MinMaxScaler 强度 g ∈ [0,1]
-
-【待处理算子】以下算子因数值稳定性问题已禁用，待架构重构后恢复：
-  LogWarper / PowerTransform / SigmoidWarper / RankTransform
+【核心架构】外层元GP在 8 维连续空间 [0,1]^8 智能选取变换配置，
+每轮内层 BO 继承上一轮的完整数据池（滚雪球），而非从固定初始点重启。
+  p[0]  → LogWarper 强度 g ∈ [0,1]
+  p[1]  → LogWarper alpha ∈ [0.1, 10.0]
+  p[2]  → PowerWarper 强度 g ∈ [0,1]
+  p[3]  → PowerWarper index ∈ [0.1, 5.0]
+  p[4]  → StandardScaler 强度 g ∈ [0,1]
+  p[5]  → StandardScaler shift ∈ [-1σ, 1σ]
+  p[6]  → StandardScaler scale ∈ [0.2, 5.0]
+  p[7]  → MinMaxScaler 强度 g ∈ [0,1]
 
 运行方式
 --------
 # 交互式菜单
 python src/main.py
 
-# 运行全部函数（默认 M=20, N=12, R=5）
+# 运行全部函数
 python src/main.py --all
 
 # 指定函数
 python src/main.py cliff_func deceptive_trap_func
 
-# 自定义 M/N/R 参数
-python src/main.py --all -M 30 -N 15 -R 3
-python src/main.py multipeak_func -M 10 -N 20 -R 1
+# 自定义参数
+python src/main.py --all -M 10 -N 10 -R 3
 
-# 快速验证（稳定算子，4D 空间）
-python src/main.py --all -R 1 -M 5 -N 8 -I 8
+# 快速验证
+python src/main.py cliff_func -R 1 -M 5 -N 8 -I 8
 
 参数说明
 --------
-  -M, --outer-iters  外层 GP 迭代次数（默认 20，4D 空间建议 5~10）
+  -M, --outer-iters  外层 GP 迭代次数（默认 8）
   -N, --inner-iters  内层 BO 步数（默认 12）
-  -R, --repeats      每函数重复次数（默认 5）
-  -I, --init-meta    外层初始拉丁超方点数（默认 36，4D 空间建议 8~12）
+  -R, --repeats      每函数重复次数（默认 8）
+  -I, --init-meta    外层初始拉丁超方点数（默认 2）
 """
 
 import sys
@@ -41,6 +42,8 @@ import os
 import time
 import warnings
 import argparse
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 # 确保 src/ 目录在 Python 路径中，使 benchmark / bo_transform 可被导入
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,17 +76,16 @@ SUMMARY_PATH = "results/summary_report.md"
 # 实验参数（可被命令行覆盖）
 # ---------------------------------------------------------------------------
 # 默认值说明：
-#   - N_REPEATS=5：每次函数重复5次（seed 42-46）
-#   - N_INIT_META：外层拉丁超方初始点数，建议 ≥ 3 × 维度数（12D → ≥36）
-#   - M_OUTER：外层 GP 迭代次数，12D 建议 20~30
+#   - N_REPEATS=8：每次函数重复 8 次（并行）
+#   - N_INIT_META：外层拉丁超方初始点数，8D 空间建议 ≥ 2
+#   - M_OUTER：外层 GP 迭代次数
 #   - N_INNER：内层 BO 步数
 # ---------------------------------------------------------------------------
-N_REPEATS    = 5
-M_OUTER      = 5    # 外层迭代（12D 空间需要足够探索）
-N_INNER      = 8    # 内层迭代（略微降低，省时间给外层）
+N_REPEATS    = 8
+M_OUTER      = 8    # 外层迭代次数 (从 4 改为 8，增强视角搜索能力)
+N_INNER      = 12   # 内层 BO 步数 (从 20 改为 12，平衡总预算 120 步)
 XI           = 0.05
-N_INIT_META  = 8    # 外层初始拉丁超方采样点  现在是4D；
-N_EXPLOIT    = 20   # 阶段二：全量经验池终极冲刺步数
+N_INIT_META  = 2    # 外层初始拉丁超方采样点
 
 
 # ======================================================================
@@ -133,8 +135,12 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=Non
 # 单次实验（一次 seed）
 # ======================================================================
 
-def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
-    """执行一次完整的基线 BO + MN-BO（连续参数），返回详细结果。"""
+def _single_run(func_obj, m_outer, n_inner, n_init_meta, xi, seed):
+    """执行一次完整的基线 BO + MN-BO（滚雪球多视角搜索）。
+
+    新架构：每轮内层 BO 从当前累积池出发，元GP智能选取下一个变换参数。
+    数据在各轮之间完全流转，不再有阶段二冲刺。
+    """
 
     bounds = func_obj.np_bounds()
     gmax   = func_obj.global_max
@@ -147,18 +153,17 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
     outer_bounds = get_outer_bounds()
 
     # ---- 采样预算对齐 ----
-    # MN-BO 总采样数：阶段一(海选) + 阶段二(冲刺)
-    total_budget = (N_INIT_META + m_outer) * n_inner + n_exploit
+    # MN-BO 总采样数 = (初始外层点数 + 外层迭代次数) × 内层步数
+    total_budget = (n_init_meta + m_outer) * n_inner
 
     # ---- 基线 BO ----
-    # 赋予基线 BO 同等于 MN-BO 总开销的采样预算，确保绝对公平
     print(f"      [基线 BO] 分配公平采样预算: {total_budget} 步")
     base_max, x_base, y_base, gpr_base = run_inner_bo(
         TransformerPipeline([IdentityOperator()]),
         func_obj, total_budget, X_init, Y_init, bounds, gmax=gmax,
     )
-    # ---- MN-BO（连续参数空间）----
-    # 外层 GP：4D 空间，适当增大 length_scale
+
+    # ---- MN-BO（滚雪球多视角搜索）----
     meta_gpr = GaussianProcessRegressor(
         kernel=C(1.0) * RBF(np.ones(N_CONTINUOUS) * 0.5, length_scale_bounds=(0.1, 2.0)),
         n_restarts_optimizer=5,
@@ -175,34 +180,47 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
             ei[sigma <= 0.0] = 0.0
         return ei
 
-    # 外层初始点：拉丁超方采样
-    X_meta_init = _latin_hypercube_init(N_INIT_META, N_CONTINUOUS, seed=seed)
-    X_meta, Y_meta = [], []
-    best_pipe, best_pipe_str, max_found = None, "", -np.inf
-    
-    # 建立全局经验池 (Global Experience Pool)
+    # 初始化全局经验池（原始空间 y 值）
     global_X_pool = X_init.copy()
-    global_Y_pool = Y_init.copy()
+    global_Y_pool = Y_init.copy()   # shape (n, 1)
 
-    print(f"      [MN-BO 阶段一] 算子海选开始，预填充 {N_INIT_META} 个点...")
+    X_meta, Y_meta = [], []
+    max_found = -np.inf
+    best_xs, best_ys, best_gpr = None, None, None
 
+    # 外层初始点：拉丁超方采样
+    X_meta_init = _latin_hypercube_init(n_init_meta, N_CONTINUOUS, seed=seed)
+
+    print(f"      [MN-BO] 滚雪球搜索开始，初始池 {len(global_X_pool)} 点，"
+          f"预填充 {n_init_meta} 个外层初始变换...")
+
+    # ---- 外层初始点：每轮从当前累积池出发 ----
     for i, init_pt in enumerate(X_meta_init):
         pipe, ps = params_to_pipeline(init_pt, Y_init)
-        found, xs, ys, lgpr = run_inner_bo(
-            pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
-        X_meta.append(init_pt)
-        Y_meta.append(-found)  # 外层 GP 最小化 -found
-        
-        # 收集本轮新采样的数据到全局经验池（跳过前 5 个初始点）
-        global_X_pool = np.vstack((global_X_pool, xs[n_init:]))
-        global_Y_pool = np.vstack((global_Y_pool, ys[n_init:]))
-        
-        if found > max_found:
-            max_found, best_pipe, best_pipe_str = found, pipe, ps
-        if (i + 1) % 4 == 0:
-            print(f"      初始点 {i+1}/{N_INIT_META} 完成  当前最佳 Max={max_found:.6f}")
+        pool_size_before = len(global_X_pool)
 
-    # 外层 GP 搜索（连续优化）
+        found, xs, ys_raw, lgpr = run_inner_bo(
+            pipe, func_obj, n_inner,
+            global_X_pool, global_Y_pool, bounds, gmax=gmax)
+
+        # 只追加本轮新采样的点
+        new_X = xs[pool_size_before:]
+        new_Y = ys_raw[pool_size_before:].reshape(-1, 1)
+        global_X_pool = np.vstack((global_X_pool, new_X))
+        global_Y_pool = np.vstack((global_Y_pool, new_Y))
+
+        X_meta.append(init_pt)
+        Y_meta.append(-found)
+
+        if found > max_found:
+            max_found = found
+            best_xs, best_ys, best_gpr = xs, ys_raw, lgpr
+
+        if (i + 1) % 4 == 0 or (i + 1) == n_init_meta:
+            print(f"      初始点 {i+1}/{n_init_meta} 完成  "
+                  f"最佳={max_found:.6f}  池子={len(global_X_pool)}点")
+
+    # ---- 外层 GP 迭代：每轮继续从累积池出发 ----
     for m in range(m_outer):
         Xm = np.array(X_meta)
         Ym = np.array(Y_meta).reshape(-1, 1)
@@ -210,39 +228,38 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
         params = propose_next_sample(meta_ei, Xm, Ym, meta_gpr, outer_bounds)
 
         pipe, ps = params_to_pipeline(params, Y_init)
-        print(f"      外层 GP {m+1}/{m_outer}  最佳配置: {ps[:60]}...")
-        found, xs, ys, lgpr = run_inner_bo(
-            pipe, func_obj, n_inner, X_init, Y_init, bounds, gmax=gmax)
+        pool_size_before = len(global_X_pool)
+        print(f"      外层GP {m+1}/{m_outer}  池子:{pool_size_before}点  "
+              f"变换: {ps}")
+
+        found, xs, ys_raw, lgpr = run_inner_bo(
+            pipe, func_obj, n_inner,
+            global_X_pool, global_Y_pool, bounds, gmax=gmax)
+
+        new_X = xs[pool_size_before:]
+        new_Y = ys_raw[pool_size_before:].reshape(-1, 1)
+        global_X_pool = np.vstack((global_X_pool, new_X))
+        global_Y_pool = np.vstack((global_Y_pool, new_Y))
+
         X_meta.append(params)
         Y_meta.append(-found)
-        
-        # 收集新采样数据到全局经验池
-        global_X_pool = np.vstack((global_X_pool, xs[n_init:]))
-        global_Y_pool = np.vstack((global_Y_pool, ys[n_init:]))
-        
-        if found > max_found:
-            max_found, best_pipe, best_pipe_str = found, pipe, ps
 
-    # ---- MN-BO 阶段二：全量经验池终极爆发 ----
-    # 此时全局池已收集阶段一产生的所有废点和好点
-    pool_size = len(global_X_pool)
-    print(f"      [MN-BO 阶段二] 海选结束！最佳算子: {best_pipe_str[:40]}")
-    print(f"      带着 {pool_size} 个全局数据的巨型雪球，冲刺 {n_exploit} 步...")
-    
-    final_found, final_xs, final_ys, final_gpr = run_inner_bo(
-        best_pipe, func_obj, n_exploit, global_X_pool, global_Y_pool, bounds, gmax=gmax)
-        
-    mnbo_max = np.max(final_ys)
+        if found > max_found:
+            max_found = found
+            best_xs, best_ys, best_gpr = xs, ys_raw, lgpr
+
+    # 最终结果：取全局池中的最大原始 y 值
+    mnbo_max = float(np.max(global_Y_pool))
 
     return {
         "base_max":    base_max,
         "mnbo_max":    mnbo_max,
-        "best_config": best_pipe_str,
+        "best_config": f"snowball_pool(size={len(global_X_pool)})",
         "x_base":      x_base,
         "y_base":      y_base,
         "gpr_base":    gpr_base,
-        "final_data":  (final_xs, final_ys, final_gpr),
-        "best_pipe":   best_pipe,
+        "final_data":  (best_xs, best_ys, best_gpr),
+        "best_pipe":   TransformerPipeline([IdentityOperator()]),
     }
 
 
@@ -253,9 +270,8 @@ def _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit):
 def run_experiment(func_name: str,
                    m_outer: int = M_OUTER,
                    n_inner: int = N_INNER,
-                   xi: float    = XI,
+                   n_init_meta: int = N_INIT_META, xi: float = XI,
                    n_repeats: int = N_REPEATS,
-                   n_exploit: int = N_EXPLOIT,
                    summary_path: str = SUMMARY_PATH,
                    seed_base: int = 42):
     """对单个函数运行 n_repeats 次独立实验，取均值输出报告。"""
@@ -264,41 +280,61 @@ def run_experiment(func_name: str,
     gmax     = func_obj.global_max
     seeds    = list(range(seed_base, seed_base + n_repeats))
 
+    # 并行执行多个重复
+    print(f"\n    [并行执行] 启动 {n_repeats} 个进程处理 {n_repeats} 次重复...")
+    run_results = []
+    
+    # 限制最大进程数为 CPU 核心数
+    max_workers = min(n_repeats, multiprocessing.cpu_count())
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 将参数打包提交给并行池
+        futures = [
+            executor.submit(_single_run, func_obj, m_outer, n_inner, n_init_meta, xi, s)
+            for s in seeds
+        ]
+        for f in futures:
+            run_results.append(f.result())
+
     # 打印外层参数维度说明
     param_names = list(OPERATOR_INFO.keys())
     print(f"\n{'='*60}")
     print(f"  函数: {func_name}  |  理论最大值: {gmax}")
-    total_budget = (N_INIT_META + m_outer) * n_inner + n_exploit
-    print(f"  外层维度: {N_CONTINUOUS}D  |  外层 M={m_outer}  内层 N={n_inner}  阶段二={n_exploit} |  总预算: {total_budget}")
+    total_budget = (N_INIT_META + m_outer) * n_inner
+    print(f"  外层维度: {N_CONTINUOUS}D  |  外层初始={N_INIT_META}  外层迭代M={m_outer}  内层N={n_inner}  |  总预算: {total_budget}")
     print(f"  外层参数:")
     for k, (op, rng, desc) in OPERATOR_INFO.items():
         print(f"    [{k}] {op}  {rng}  — {desc}")
     print(f"  重复次数: {n_repeats}")
     print(f"{'='*60}")
 
-    # ---- 逐次运行 ----
-    run_results = []
-    for i, seed in enumerate(seeds):
-        print(f"\n  ── 第 {i+1}/{n_repeats} 次（seed={seed}）──")
-        r = _single_run(func_obj, m_outer, n_inner, xi, seed, n_exploit)
-        run_results.append(r)
-        print(f"     基线 Max={r['base_max']:.6f}  "
-              f"MN-BO Max={r['mnbo_max']:.6f}")
-
+    # ---- 统计汇总 ----
     # ---- 统计汇总 ----
     base_maxes = np.array([r["base_max"]  for r in run_results])
     mnbo_maxes = np.array([r["mnbo_max"]  for r in run_results])
     max_diffs  = mnbo_maxes - base_maxes
+
+    # 成功率统计：y > 90% * gmax
+    threshold = 0.9 * gmax
+    base_success_count = np.sum(base_maxes > threshold)
+    mnbo_success_count = np.sum(mnbo_maxes > threshold)
+    base_success_rate  = base_success_count / n_repeats
+    mnbo_success_rate  = mnbo_success_count / n_repeats
 
     avg_base, std_base = base_maxes.mean(), base_maxes.std()
     avg_mnbo, std_mnbo = mnbo_maxes.mean(), mnbo_maxes.std()
     avg_diff, std_diff = max_diffs.mean(), max_diffs.std()
 
     print(f"\n{'─'*60}")
-    print(f"  汇总（{n_repeats} 次均值）")
+    print(f"  原始数据 (Raw Data):")
+    print(f"    基线  : {[round(float(x), 4) for x in base_maxes]}")
+    print(f"    MN-BO : {[round(float(x), 4) for x in mnbo_maxes]}")
+    print(f"  汇总（{n_repeats} 次统计）")
+    print(f"  基线成功率 : {base_success_rate*100:.1f}% ({base_success_count}/{n_repeats})")
+    print(f"  MN-BO成功率 : {mnbo_success_rate*100:.1f}% ({mnbo_success_count}/{n_repeats})")
     print(f"  基线 Max    : {avg_base:.6f} ± {std_base:.6f}")
     print(f"  MN-BO Max   : {avg_mnbo:.6f} ± {std_mnbo:.6f}")
-    print(f"  Max 差值    : {avg_diff:.6f} ± {std_diff:.6f} (正数优)")
+    print(f"  Max 差值    : {avg_diff:.6f} ± {std_diff:.6f}")
     print(f"{'─'*60}")
 
     # ---- 选出中位次绘图 ----
@@ -351,6 +387,8 @@ def run_experiment(func_name: str,
         baseline_max=avg_base, mnbo_max=avg_mnbo,
         baseline_std=std_base, mnbo_std=std_mnbo,
         max_diff_avg=avg_diff, max_diff_std=std_diff,
+        baseline_success=base_success_rate,
+        mnbo_success=mnbo_success_rate,
         n_repeats=n_repeats,
         best_config=best_pipe_str,
         samples_x=xs_best, samples_y=ys_best,
@@ -363,17 +401,28 @@ def run_experiment(func_name: str,
         baseline_max=avg_base, baseline_std=std_base,
         mnbo_max=avg_mnbo, mnbo_std=std_mnbo,
         max_diff=avg_diff, max_diff_std=std_diff,
+        baseline_success=base_success_rate,
+        mnbo_success=mnbo_success_rate,
         best_config=best_pipe_str,
         n_repeats=n_repeats,
         total_time=0,
     )
-    print(f"  报告已写入: {md_path}")
+    # 额外在 md 中记录原始数据供查看（保留4位小数）
+    raw_base_str = ", ".join([f"{x:.4f}" for x in base_maxes])
+    raw_mnbo_str = ", ".join([f"{x:.4f}" for x in mnbo_maxes])
+    with open(md_path, "a", encoding="utf-8") as f:
+        f.write("\n## 4. 原始数据 (Raw Data)\n\n")
+        f.write(f"- 基线 Max 序列: `[{raw_base_str}]`\n")
+        f.write(f"- MN-BO Max 序列: `[{raw_mnbo_str}]`\n")
 
-    # 将平均结果返回，用于最后大汇总
+    # 将结果返回，用于最后大汇总（保留原始精度，仅展示层控制）
     return {
         "avg_base_max": avg_base, "std_base_max": std_base,
         "avg_mnbo_max": avg_mnbo, "std_mnbo_max": std_mnbo,
         "avg_max_diff": avg_diff, "std_max_diff": std_diff,
+        "base_success": base_success_rate,
+        "mnbo_success": mnbo_success_rate,
+        "raw_mnbo_str": f"[{raw_mnbo_str}]",
         "total_time":   0
     }
 
@@ -422,7 +471,7 @@ def interactive_menu() -> list[str]:
 if __name__ == "__main__":
     # ---- 命令行参数解析 ----
     parser = argparse.ArgumentParser(
-        description="MN-BO 实验入口（v2 连续参数化）",
+        description="MN-BO 实验入口（v3.2 滚雪球多视角搜索）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
@@ -457,13 +506,10 @@ if __name__ == "__main__":
         "-I", "--init-meta", type=int, default=None,
         help=f"外层初始拉丁超方点数（默认：{N_INIT_META}）"
     )
+
     parser.add_argument(
-        "-E", "--exploit-iters", type=int, default=None,
-        help=f"阶段二终极冲刺步数（默认：{N_EXPLOIT}）"
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42,
-        help="随机种子基值（默认：42）"
+        "--seed", type=int, default=2024,
+        help="随机种子基值（默认：2024）"
     )
     args = parser.parse_args()
 
@@ -476,17 +522,15 @@ if __name__ == "__main__":
         globals()["N_REPEATS"] = args.repeats
     if args.init_meta is not None:
         globals()["N_INIT_META"] = args.init_meta
-    if args.exploit_iters is not None:
-        globals()["N_EXPLOIT"] = args.exploit_iters
+
 
     # 打印当前生效的参数（从 globals 读取，确保一致）
     _M  = globals()["M_OUTER"]
     _N  = globals()["N_INNER"]
-    _E  = globals()["N_EXPLOIT"]
     _R  = globals()["N_REPEATS"]
     _IM = globals()["N_INIT_META"]
-    print(f"\n生效参数：M={_M}（外层迭代） × N={_N}（内层步数） × "
-          f"初始点={_IM} × 冲刺={_E}步 × 重复={_R}次")
+    print(f"\n生效参数：初始点={_IM} × 外层迭代M={_M} × 内层步数N={_N} × 重复={_R}次"
+          f"  |  总预算/函数={(_IM + _M) * _N}步")
 
     # ---- 确定要运行的函数 ----
     all_funcs = list_functions()
@@ -506,19 +550,40 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\n将运行 {len(chosen)} 个函数（每个 {_R} 次取均值）：{chosen}")
-    print(f"外层搜索空间：{N_CONTINUOUS}D  |  初始 {_IM} 点  |  "
-          f"M={_M}（外层迭代） × N={_N}（内层步数）")
+    print(f"架构：滚雪球多视角搜索  |  外层{N_CONTINUOUS}D  |  初始{_IM}点  |  "
+          f"M={_M}×N={_N}  |  总预算={(_IM + _M) * _N}步")
 
-    # 批量实验生成带时间戳的汇总报告，保留历史
+    # 路径准备
+    summary_dir = "results/summary"
+    log_dir = "results/logs"
+    os.makedirs(summary_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+
     from datetime import datetime
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    summary_path = os.path.join("results", f"summary_report_{ts}.md")
+    summary_path = os.path.join(summary_dir, f"summary_report_{ts}.md")
+    execution_log_path = os.path.join(log_dir, f"run_{ts}.log")
+
+    # 简单的日志重定向：同时输出到终端和文件
+    class Logger:
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, "w", encoding="utf-8")
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+
+    sys.stdout = Logger(execution_log_path)
+    print(f"日志将实时保存至: {execution_log_path}")
 
     _SEED = args.seed
     t_total = time.time()
     results = {}
     for name in chosen:
-        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R, n_exploit=_E,
+        r = run_experiment(name, m_outer=_M, n_inner=_N, n_repeats=_R,
                            summary_path=summary_path, seed_base=_SEED)
         results[name] = r
 
@@ -541,21 +606,19 @@ if __name__ == "__main__":
     print(f"  累计汇总报告：{summary_path}")
 
     # 生成带时间戳的批次汇总文件
-    import datetime
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    summary_dir = "results/summary"
-    os.makedirs(summary_dir, exist_ok=True)
-    batch_summary_path = f"{summary_dir}/batch_summary_{timestamp}.md"
+    batch_summary_path = os.path.join(summary_dir, f"batch_summary_{ts}.md")
     with open(batch_summary_path, "w", encoding="utf-8") as f:
-        f.write(f"# 批量实验汇总报告（两阶段火箭法）\n\n")
-        f.write(f"- **生成时间**: {timestamp}\n")
-        f.write(f"- **参数配置**: 外层M={_M}, 内层N={_N}, 外层初始点={_IM}, 冲刺E={_E}, 重复={_R}次\n")
-        f.write(f"- **基线/MN-BO总预算**: {(_IM + _M) * _N + _E} 步\n")
-        f.write(f"- **总耗时**: {total_time:.1f}s\n\n")
-        f.write("| 函数 | 基线 Max | MN-BO Max | Max 差值 |\n")
-        f.write("|------|-----------|-----------|--------------|\n")
+        f.write(f"# 批量实验汇总报告（滚雪球多视角搜索）\n\n")
+        f.write(f"- **生成时间**: {ts}\n")
+        f.write(f"- **参数配置**: 外层初始点={_IM}, 外层迭代M={_M}, 内层N={_N}, 重复={_R}次\n")
+        f.write(f"- **基线/MN-BO总预算**: {(_IM + _M) * _N} 步\n")
+        sys.stdout.flush()
+        f.write("| 函数 | 基线 Max | MN-BO Max | 基线成功率 | MN-BO 成功率 | 原始数据 (MN-BO) |\n")
+        f.write("|------|-----------|-----------|------------|--------------|-------------------|\n")
         for name, r in results.items():
             f.write(f"| {name} | {r['avg_base_max']:.4f}±{r['std_base_max']:.4f} | "
                     f"{r['avg_mnbo_max']:.4f}±{r['std_mnbo_max']:.4f} | "
-                    f"{r['avg_max_diff']:.4f}±{r['std_max_diff']:.4f} |\n")
+                    f"{r['base_success']*100:.1f}% | "
+                    f"{r['mnbo_success']*100:.1f}% | "
+                    f"`{r['raw_mnbo_str']}` |\n")
     print(f"  单次批次汇总：{batch_summary_path}")

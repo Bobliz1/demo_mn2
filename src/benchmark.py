@@ -38,9 +38,8 @@ def _fmt(val, sig=3):
         return "nan"
     if math.isinf(float_val):
         return "inf" if float_val > 0 else "-inf"
-    # 负值允许显示（噪声或理论最大值估计偏差可能导致 found_max > global_max）
-
-    abs_val = float_val
+    # 负值允许显示（某些函数如 valley_ridge 包含负值区间，且噪声可能导致偏移）
+    abs_val = abs(float_val)
     if abs_val >= 1e4 or (abs_val != 0 and abs_val < 1e-3):
         return f"{float_val:.1e}" if sig == 3 else f"{float_val:.{sig-1}e}"
     else:
@@ -140,6 +139,7 @@ class ExperimentLogger:
         baseline_max, mnbo_max,
         baseline_std=0.0, mnbo_std=0.0,
         max_diff_avg=0.0, max_diff_std=0.0,
+        baseline_success=0.0, mnbo_success=0.0,
         n_repeats=1,
         best_config,
         samples_x, samples_y,
@@ -172,6 +172,8 @@ class ExperimentLogger:
             f.write(f"| 基线 Max | {_fmt(baseline_max)} |\n")
             f.write(f"| MN-BO Max | {_fmt(mnbo_max)} |\n")
             f.write(f"| Max 差值 (正优) | {_fmt(max_diff_avg)} |\n")
+            f.write(f"| 基线成功率 | {baseline_success*100:.1f}% |\n")
+            f.write(f"| MN-BO 成功率 | {mnbo_success*100:.1f}% |\n")
             f.write(f"\n- **最佳变换配置**：{best_config}\n\n")
 
             # 2. 可视化
@@ -196,6 +198,7 @@ class ExperimentLogger:
                            baseline_max, baseline_std,
                            mnbo_max, mnbo_std,
                            max_diff, max_diff_std,
+                           baseline_success, mnbo_success,
                            best_config,
                            n_repeats,
                            total_time):
@@ -208,19 +211,17 @@ class ExperimentLogger:
             if write_header:
                 f.write("# 实验汇总报告\n\n")
                 f.write(f"> **报告生成时间**：{now_str}\n\n")
-                f.write("| 函数 | 理论最大值 | 基线 Max | MN-BO Max"
-                        " | Max 差值 (正优) |"
-                        " 重复次数 | 耗时(s) |\n")
-                f.write("|------|-----------|---------|----------|"
-                        "-------------|"
-                        "--------|-------|\n")
+                f.write("| 函数 | 理论最大值 | 基线 Max | MN-BO Max | Max 差值 | 基线成功率 | MN-BO 成功率 | 重复次数 | 耗时(s) |\n")
+                f.write("|------|-----------|---------|----------|-------------|-----------|-------------|--------|-------|\n")
 
             f.write(
-                f"| {self.func_name} "
+                    f"| {self.func_name} "
                 f"| {_fmt(self.global_max)} "
                 f"| {_fmt(baseline_max)} "
                 f"| {_fmt(mnbo_max)} "
                 f"| {_fmt(max_diff)} "
+                f"| {baseline_success*100:.1f}% "
+                f"| {mnbo_success*100:.1f}% "
                 f"| {n_repeats} "
                 f"| {total_time:.1f} |\n"
             )
