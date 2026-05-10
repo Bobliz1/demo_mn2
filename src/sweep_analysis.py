@@ -6,12 +6,12 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from main import run_experiment
-from benchmark import list_functions
+from benchmark import list_functions, get_func
 
 def run_sweep():
     # 设定实验基准
     FIXED_R = 80
-    FIXED_SEED = 1012
+    FIXED_SEED = 506
     
     # 细化黄金鲁棒区 (M ∈ [4, 9], Budget ≈ 120, I=2)
     combinations = [
@@ -27,6 +27,7 @@ def run_sweep():
     test_funcs = list_functions()
     
     results_summary = []
+    baseline_summary = {}  # 存储基线数据 {func: {"avg_max": x, "success": y, "gmax": z}}
     
     print(f"开始全量 M/N 扫参实验 | R={FIXED_R} | Seed={FIXED_SEED}")
     print("=" * 70)
@@ -56,6 +57,14 @@ def run_sweep():
                 "avg_max": res["avg_mnbo_max"],
                 "success": res["mnbo_success"]
             }
+            # 记录基线数据与理论最大值
+            if m == 8:
+                f_obj = get_func(func)
+                baseline_summary[func] = {
+                    "avg_max": res["avg_base_max"],
+                    "success": res["base_success"],
+                    "gmax": f_obj.global_max
+                }
         
         results_summary.append(combo_results)
     
@@ -67,11 +76,26 @@ def run_sweep():
         
         for func in test_funcs:
             f.write(f"## 函数: {func}\n\n")
-            f.write("| 策略描述 | M (视角) | N (深度) | 成功率 | 平均 Max |\n")
-            f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+            f.write("| 策略描述 | M (视角) | N (深度) | 总预算 | 成功率 | 平均 Max | 理论最大值 |\n")
+            f.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+            
+            # 理论最大值列的数据
+            gmax_val = baseline_summary[func]["gmax"] if func in baseline_summary else "N/A"
+            
+            # 插入基线行
+            if func in baseline_summary:
+                b = baseline_summary[func]
+                f.write(f"| **Baseline (BO)** | - | - | 120 | {b['success']*100:.1f}% | **{b['avg_max']:.4f}** | {gmax_val} |\n")
+            
             for item in results_summary:
                 d = item["data"][func]
-                f.write(f"| {item['desc']} | {item['m']} | {item['n']} | {d['success']*100:.1f}% | {d['avg_max']:.4f} |\n")
+                budget = (2 + item["m"]) * item["n"]
+                # 标记 MN-BO 是否优于基线
+                is_better = ""
+                if func in baseline_summary and d["avg_max"] > baseline_summary[func]["avg_max"]:
+                    is_better = " ⭐"
+                
+                f.write(f"| {item['desc']} | {item['m']} | {item['n']} | {budget} | {d['success']*100:.1f}% | {d['avg_max']:.4f}{is_better} | {gmax_val} |\n")
             f.write("\n")
             
     print("\n" + "=" * 70)

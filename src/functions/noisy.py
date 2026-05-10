@@ -14,7 +14,7 @@ class Noisy(BenchmarkFunc):
     def __call__(self, x):
         signal = (2.0 * np.exp(-0.5 * x ** 2)
                   + 1.5 * np.exp(-0.1 * (x - 3) ** 2))
-        noise  = (0.8 * np.random.randn(*x.shape)
+        noise  = (0.3 * np.random.randn(*x.shape)
                   if isinstance(x, np.ndarray)
-                  else 0.8 * np.random.randn())
+                  else 0.3 * np.random.randn())
         return signal + noise
