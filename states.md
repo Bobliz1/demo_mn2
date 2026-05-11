@@ -191,6 +191,7 @@ python src/main.py cliff_func -R 1 -M 5 -N 20
   - **执行原则**：本次更新仅记录思路，**暂不改动脚本代码**，等待用户进一步授权。
 
 * **[17:20] 重要里程碑：确立 `feat/hardcoded-mn-tuning` 为性能标杆 (Gold Standard)**：
+  - **位置说明**：**该实验及相关逻辑仅在 `feat/hardcoded-mn-tuning` 分支执行，`master` 分支仅同步此日志作为战略指引。**
   - **核心战果**：通过在 `needle_in_haystack` 上应用 M=4, N=20 的加深策略，成功在 Seed 1234 下跑出了 **+2.72** 的压制性差值，成功率从 12.5% 跃升至 **62.5%**。
   - **战略定调**：
     1. **标杆确立**：即日起，`feat/hardcoded-mn-tuning` 分支将作为项目的“天花板”或“性能基准”。
