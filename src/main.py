@@ -108,7 +108,7 @@ TARGET_BUDGETS = {
 # M: 外层视角数, N: 内层每视角步数
 # 规则：对于低预算函数，减少 M 以保证 N 足够深。
 FUNCTION_SPECIFIC_MN = {
-    "needle_in_haystack_func": (8, 12),   # 120步: 保持视角广度
+    "needle_in_haystack_func": (4, 20),   # 从 (8, 12) 改为 (4, 20)，测试加深策略
     "flat_region_func": (6, 15),          # 100步: 增加深度
     "noisy_func": (5, 20),                # 120步: 噪声需要更深挖掘
     "deceptive_trap_func": (5, 12),       # 75步
