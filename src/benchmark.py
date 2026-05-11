@@ -85,13 +85,13 @@ def expected_improvement(X, X_sample, Y_sample, gpr, xi=0.01):
         Y_sample = Y_sample.reshape(-1, 1)
     mu, sigma = gpr.predict(X, return_std=True)
     mu_opt    = np.max(Y_sample)
-    sigma     = sigma.reshape(-1, 1)
+    
     with np.errstate(divide="ignore", invalid="ignore"):
         imp = mu - mu_opt - xi
         Z   = imp / sigma
         ei  = imp * norm.cdf(Z) + sigma * norm.pdf(Z)
         ei[sigma <= 0.0] = 0.0
-    return ei
+    return ei.flatten()
 
 
 def propose_next_sample(acquisition, X_sample, Y_sample, gpr, bounds,
@@ -201,27 +201,37 @@ class ExperimentLogger:
                            baseline_success, mnbo_success,
                            best_config,
                            n_repeats,
-                           total_time):
-        """向全局汇总表追加一行（无方差，科学计数法，标题含日期时间）。"""
+                           total_time,
+                           m_val=None,
+                           n_val=None,
+                           total_budget=None,
+                           policy='N/A'):
+        """向全局汇总表追加一行。"""
         write_header = not os.path.exists(summary_path)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
         with open(summary_path, "a", encoding="utf-8") as f:
             if write_header:
-                f.write("# 实验汇总报告\n\n")
-                f.write(f"> **报告生成时间**：{now_str}\n\n")
-                f.write("| 函数 | 理论最大值 | 基线 Max | MN-BO Max | Max 差值 | 基线成功率 | MN-BO 成功率 | 重复次数 | 耗时(s) |\n")
-                f.write("|------|-----------|---------|----------|-------------|-----------|-------------|--------|-------|\n")
+                f.write("# MN-BO 实验汇总报告\n\n")
+                f.write(f"> **报告生成时间**：{now_str}  \n")
+                f.write(f"> **调度策略**：`{policy}`\n\n")
+                # 调整表头：移除实际步数，加入 M/N 配置
+                f.write("| 函数 | 理论最大值 | 基线 Max | MN-BO Max | Max 差值 | 基线成功率 | MN-BO 成功率 | M/N 配置 | 预算步数 | 重复次数 | 策略 | 耗时(s) |\n")
+                f.write("|------|-----------|---------|----------|-------------|-----------|-------------|---------|---------|--------|------|-------|\n")
 
+            mn_str = f"({m_val}, {n_val})" if m_val is not None else "N/A"
+            budget_str = f"{total_budget}" if total_budget is not None else "N/A"
             f.write(
-                    f"| {self.func_name} "
+                f"| {self.func_name} "
                 f"| {_fmt(self.global_max)} "
                 f"| {_fmt(baseline_max)} "
                 f"| {_fmt(mnbo_max)} "
                 f"| {_fmt(max_diff)} "
                 f"| {baseline_success*100:.1f}% "
                 f"| {mnbo_success*100:.1f}% "
+                f"| {mn_str} "
+                f"| {budget_str} "
                 f"| {n_repeats} "
+                f"| {policy} "
                 f"| {total_time:.1f} |\n"
             )

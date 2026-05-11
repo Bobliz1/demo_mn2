@@ -8,7 +8,7 @@ class Noisy(BenchmarkFunc):
     难点：GP 拟合噪声项时 α 参数敏感；噪声使 EI 在全域均匀弥散。
     """
     name       = "noisy_func"
-    global_max = 4.9836
+    global_max = 2.609
     bounds     = (-5.0, 5.0)
 
     def __call__(self, x):
