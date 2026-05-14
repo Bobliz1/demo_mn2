@@ -116,6 +116,8 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=Non
     max_ei_initial = 0.0
     step = 0
     max_extension = 50  # 从 200 降到 50，平衡潜力搜索与计算成本
+    patience_counter = 0
+    max_patience = 2    # 允许连续 2 次 EI 低于阈值而不中断
     
     while True:
         gpr.fit(X, Y_t)
@@ -135,14 +137,23 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=Non
             current_std = float(np.std(Y_t))
             floor_threshold = 1e-3 * current_std if current_std > 1e-10 else 1e-6
             stop_threshold = max(0.1 * max_ei_initial, floor_threshold)
-            if current_max_ei <= stop_threshold or (step - n_iter) >= max_extension:
-                if current_max_ei > stop_threshold:
-                    print(f"        [Budget Extender] 达到单视角硬上限 {max_extension}。强制停止。总计执行 {step} 步", flush=True)
-                elif step > n_iter:
-                    print(f"        [Budget Extender] EI下降至 {current_max_ei:.6f} <= {stop_threshold:.6f}。延长结束，本视角总执行 {step} 步 (延长 {step - n_iter} 步)", flush=True)
-                break
             
-            if step == n_iter:
+            if (step - n_iter) >= max_extension:
+                print(f"        [Budget Extender] 达到单视角硬上限 {max_extension}。强制停止。总计执行 {step} 步", flush=True)
+                break
+
+            if current_max_ei <= stop_threshold:
+                patience_counter += 1
+                if patience_counter >= max_patience:
+                    if step > n_iter:
+                        print(f"        [Budget Extender] 连续 {max_patience} 次 EI 低于阈值 (当前 {current_max_ei:.6f} <= {stop_threshold:.6f})。延长结束，本视角总执行 {step} 步 (延长 {step - n_iter} 步)", flush=True)
+                    break
+                elif step >= n_iter:
+                    print(f"        [Budget Extender] 警告: EI下降至 {current_max_ei:.6f} <= {stop_threshold:.6f}。耐心值剩余 {max_patience - patience_counter}", flush=True)
+            else:
+                patience_counter = 0  # 恢复耐心值
+            
+            if step == n_iter and patience_counter == 0:
                 print(f"        [Budget Extender] 触发延长逻辑: 当前EI={current_max_ei:.6f}, 阈值={stop_threshold:.6f}", flush=True)
                 
         ny  = wrapped(nx)

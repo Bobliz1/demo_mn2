@@ -145,16 +145,27 @@ class ExperimentLogger:
         samples_x, samples_y,
         best_x, best_y,
         fig,
+        fig_reg=None, # 新增
         outer_time=0, inner_time=0,
         kernel_info="RBF",
     ):
         """记录实验结果（含多次重复统计）到独立 md 文件。"""
         ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
         now_str       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        plot_filename = f"plot_{ts}.png"
+        
+        # 保存 1D 拟合图
+        plot_filename = f"plot_1d_{ts}.png"
         plot_path     = os.path.join(self.plot_dir, plot_filename)
         fig.savefig(plot_path, dpi=120, bbox_inches="tight")
         plt.close(fig)
+
+        # 保存 Regret 曲线图
+        reg_filename = None
+        if fig_reg:
+            reg_filename = f"plot_regret_{ts}.png"
+            reg_path = os.path.join(self.plot_dir, reg_filename)
+            fig_reg.savefig(reg_path, dpi=120, bbox_inches="tight")
+            plt.close(fig_reg)
 
         md_path = os.path.join(self.results_dir, f"{self.func_name}_{ts}.md")
 
@@ -177,9 +188,18 @@ class ExperimentLogger:
             f.write(f"\n- **最佳变换配置**：{best_config}\n\n")
 
             # 2. 可视化
-            rel_plot = os.path.join("plots", plot_filename).replace("\\", "/")
             f.write("## 2. 可视化（选取中位数次）\n\n")
-            f.write(f"![优化结果]({rel_plot})\n\n")
+            
+            # 2.1 1D 拟合图
+            rel_plot_1d = os.path.join("plots", plot_filename).replace("\\", "/")
+            f.write("### 2.1 1D 拟合截面图\n\n")
+            f.write(f"![1D 拟合]({rel_plot_1d})\n\n")
+            
+            # 2.2 Regret 曲线图
+            if reg_filename:
+                rel_plot_reg = os.path.join("plots", reg_filename).replace("\\", "/")
+                f.write("### 2.2 优化收敛曲线 (Simple Regret)\n\n")
+                f.write(f"![Regret 曲线]({rel_plot_reg})\n\n")
 
             # 3. 实验配置
             f.write("## 3. 实验配置\n\n")

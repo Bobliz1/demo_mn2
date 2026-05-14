@@ -255,6 +255,10 @@ python src/main.py cliff_func -R 1 -M 5 -N 20
   - **评估公平性**：重构了实验顺序，先运行 MN-BO 确定实际步数，再将该步数精准同步给基线 BO，实现了相同种子下的绝对采样成本对齐。
   - **绘图兼容**：在 `run_experiment` 中引入了 `np.pad(mode='edge')` 处理非对齐长度序列的均值计算，解决了因动态延长导致的 Regret 曲线绘制报错问题。
 
+* **[01:21] 项目工作区目录重组 (Workspace Reorganization)**：
+  - **文档归档**：创建了 `docs/` 文件夹，并将展示材料和框架说明（`framework.md`, `framework.pdf`, `presentation.md`, `presentation.tex`）全部移入其中。
+  - **根目录精简**：目前根目录仅保留最核心的代码库 `src/`、结果库 `results/`、核心日志 `states.md` 以及团队协作配置 `RULES.md` 和 `CONVENTIONS.md`，极大提升了左侧资源管理器的可读性。
+
 ---
 
 ---

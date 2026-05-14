@@ -32,24 +32,24 @@ MN-BO 的核心创新在于将复杂的非线性空间变换分解为一个**有
 - **动态预算分配**：针对函数难度阶梯化配置 30~120 步总预算。
 - **早停机制 (v3.4)**：引入“认知不确定性锁”，仅在模型置信度高（Max Std < 0.3）且收益递减时触发提前退出。
 
-## 快速运行
+## 快速运行 (Standardized Environment)
+
+本项目已规范化环境配置。你可以直接使用 `./.venv` 下的 Python，无需手动 `conda activate`。
 
 ```bash
-# 激活环境
-conda activate bo_env
-
 # 1. 运行全部函数（使用默认高强度配置：120步，8次重复，并行执行）
-python src/main.py --all
+./.venv/bin/python src/main.py --all
 
 # 2. 交互式菜单（手动选择函数）
-python src/main.py
+./.venv/bin/python src/main.py
 
 # 3. 指定函数运行
-python src/main.py cliff_func needle_in_haystack_func
+./.venv/bin/python src/main.py cliff_func needle_in_haystack_func
 
 # 4. 手动调整参数
-python src/main.py --all -R 4 -M 10 -N 15
+./.venv/bin/python src/main.py --all -R 4 -M 10 -N 15
 ```
+
 
 ## 目录结构
 
