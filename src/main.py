@@ -102,7 +102,7 @@ def _latin_hypercube_init(n_points: int, n_dims: int, seed: int = 42) -> np.ndar
 # 内层 BO
 # ======================================================================
 
-def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=None):
+def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=None, allow_extend=True):
     wrapped = WrappedTarget(target_func, pipeline)
     X   = x_init.copy()
     Y_t = pipeline.forward(y_init)
@@ -112,12 +112,43 @@ def run_inner_bo(pipeline, target_func, n_iter, x_init, y_init, bounds, gmax=Non
         n_restarts_optimizer=3,   # 从 10 降到 3，精度几乎不变，速度快 3×
         alpha=1e-5,
     )
-    for _ in range(n_iter):
+    
+    max_ei_initial = 0.0
+    step = 0
+    max_extension = 50  # 从 200 降到 50，平衡潜力搜索与计算成本
+    
+    while True:
         gpr.fit(X, Y_t)
         nx  = propose_next_sample(expected_improvement, X, Y_t, gpr, bounds)
+        
+        # 计算当前 nx 的 EI，用于判定是否延长
+        current_ei_array = expected_improvement(nx.reshape(1, -1), X, Y_t, gpr)
+        current_max_ei = float(np.max(current_ei_array))
+        
+        if step < n_iter:
+            max_ei_initial = max(max_ei_initial, current_max_ei)
+        else:
+            if not allow_extend:
+                break
+            
+            # 停止条件：EI 衰减过低（相对巅峰 10% 或 相对数据分布 1e-3 * std）
+            current_std = float(np.std(Y_t))
+            floor_threshold = 1e-3 * current_std if current_std > 1e-10 else 1e-6
+            stop_threshold = max(0.1 * max_ei_initial, floor_threshold)
+            if current_max_ei <= stop_threshold or (step - n_iter) >= max_extension:
+                if current_max_ei > stop_threshold:
+                    print(f"        [Budget Extender] 达到单视角硬上限 {max_extension}。强制停止。总计执行 {step} 步", flush=True)
+                elif step > n_iter:
+                    print(f"        [Budget Extender] EI下降至 {current_max_ei:.6f} <= {stop_threshold:.6f}。延长结束，本视角总执行 {step} 步 (延长 {step - n_iter} 步)", flush=True)
+                break
+            
+            if step == n_iter:
+                print(f"        [Budget Extender] 触发延长逻辑: 当前EI={current_max_ei:.6f}, 阈值={stop_threshold:.6f}", flush=True)
+                
         ny  = wrapped(nx)
         X   = np.vstack((X, nx))
         Y_t = np.vstack((Y_t, ny))
+        step += 1
 
     # 全局安全 clamp：防止 backward 变换数值溢出。
     # 宽松 clamp 避免裁剪正常值，_fmt 会把负 Gap（溢出）显示为 "N/A"。
@@ -152,16 +183,10 @@ def _single_run(func_obj, m_outer, n_inner, n_init_meta, xi, seed):
 
     outer_bounds = get_outer_bounds()
 
-    # ---- 采样预算对齐 ----
-    # MN-BO 总采样数 = (初始外层点数 + 外层迭代次数) × 内层步数
-    total_budget = (n_init_meta + m_outer) * n_inner
-
-    # ---- 基线 BO ----
-    print(f"      [基线 BO] 分配公平采样预算: {total_budget} 步")
-    base_max, x_base, y_base, gpr_base = run_inner_bo(
-        TransformerPipeline([IdentityOperator()]),
-        func_obj, total_budget, X_init, Y_init, bounds, gmax=gmax,
-    )
+    # ---- 采样预算保底对齐 ----
+    # MN-BO 基础总采样数 = (初始外层点数 + 外层迭代次数) × 内层步数
+    # 由于有 Budget Extender，实际总步数会在运行 MN-BO 后动态确定。
+    # 我们先跑 MN-BO，再按实际消耗的步数运行 Baseline BO。
 
     # ---- MN-BO（滚雪球多视角搜索）----
     meta_gpr = GaussianProcessRegressor(
@@ -248,6 +273,14 @@ def _single_run(func_obj, m_outer, n_inner, n_init_meta, xi, seed):
             max_found = found
             best_xs, best_ys, best_gpr = xs, ys_raw, lgpr
 
+    # ---- 将基线 BO 移到此处，进行绝对严格的预算对齐 ----
+    actual_total_budget = len(global_X_pool) - n_init
+    print(f"      [基线 BO] 分配公平采样预算 (对齐 MN-BO实际步数): {actual_total_budget} 步")
+    base_max, x_base, y_base, gpr_base = run_inner_bo(
+        TransformerPipeline([IdentityOperator()]),
+        func_obj, actual_total_budget, X_init, Y_init, bounds, gmax=gmax, allow_extend=False,
+    )
+
     # 最终结果：取全局池中的最大原始 y 值
     mnbo_max = float(np.max(global_Y_pool))
 
@@ -260,6 +293,9 @@ def _single_run(func_obj, m_outer, n_inner, n_init_meta, xi, seed):
         "gpr_base":    gpr_base,
         "final_data":  (best_xs, best_ys, best_gpr),
         "best_pipe":   TransformerPipeline([IdentityOperator()]),
+        # 新增：返回完整的 Y 评估序列（排除前 n_init 个初始随机采样点）
+        "y_base_seq":  y_base[n_init:].flatten(),
+        "y_mnbo_seq":  global_Y_pool[n_init:].flatten(),
     }
 
 
@@ -300,8 +336,8 @@ def run_experiment(func_name: str,
     param_names = list(OPERATOR_INFO.keys())
     print(f"\n{'='*60}")
     print(f"  函数: {func_name}  |  理论最大值: {gmax}")
-    total_budget = (N_INIT_META + m_outer) * n_inner
-    print(f"  外层维度: {N_CONTINUOUS}D  |  外层初始={N_INIT_META}  外层迭代M={m_outer}  内层N={n_inner}  |  总预算: {total_budget}")
+    base_budget = (N_INIT_META + m_outer) * n_inner
+    print(f"  外层维度: {N_CONTINUOUS}D  |  外层初始={N_INIT_META}  外层迭代M={m_outer}  内层N={n_inner}  |  保底预算: {base_budget}")
     print(f"  外层参数:")
     for k, (op, rng, desc) in OPERATOR_INFO.items():
         print(f"    [{k}] {op}  {rng}  — {desc}")
@@ -309,10 +345,36 @@ def run_experiment(func_name: str,
     print(f"{'='*60}")
 
     # ---- 统计汇总 ----
-    # ---- 统计汇总 ----
     base_maxes = np.array([r["base_max"]  for r in run_results])
     mnbo_maxes = np.array([r["mnbo_max"]  for r in run_results])
     max_diffs  = mnbo_maxes - base_maxes
+
+    # ---- 纵向 Regret 序列处理 (支持非对齐长度) ----
+    base_seqs_list = [r["y_base_seq"] for r in run_results]
+    mnbo_seqs_list = [r["y_mnbo_seq"] for r in run_results]
+
+    max_len = max(
+        max([len(seq) for seq in base_seqs_list]),
+        max([len(seq) for seq in mnbo_seqs_list])
+    )
+
+    # 使用前向填充 (ffill/edge) 补齐较短的序列
+    base_seqs = np.array([np.pad(seq, (0, max_len - len(seq)), mode='edge') for seq in base_seqs_list])
+    mnbo_seqs = np.array([np.pad(seq, (0, max_len - len(seq)), mode='edge') for seq in mnbo_seqs_list])
+
+    # 计算累积最大值 (Best Found So Far)
+    base_cummax = np.maximum.accumulate(base_seqs, axis=1)
+    mnbo_cummax = np.maximum.accumulate(mnbo_seqs, axis=1)
+
+    # 计算 Simple Regret (gmax - BestSoFar)
+    base_regret = gmax - base_cummax
+    mnbo_regret = gmax - mnbo_cummax
+
+    # 计算均值和标准差用于 Shadow 绘制
+    base_reg_mean = base_regret.mean(axis=0)
+    base_reg_std  = base_regret.std(axis=0)
+    mnbo_reg_mean = mnbo_regret.mean(axis=0)
+    mnbo_reg_std  = mnbo_regret.std(axis=0)
 
     # 成功率统计：y > 90% * gmax
     threshold = 0.9 * gmax
@@ -380,6 +442,25 @@ def run_experiment(func_name: str,
 
     plt.tight_layout()
 
+    # ---- 绘制 Regret 曲线图 (v3.2+ Regret Plot) ----
+    fig_reg, ax_reg = plt.subplots(figsize=(8, 6))
+    steps = np.arange(len(base_reg_mean))
+    
+    # 基线绘制
+    ax_reg.plot(steps, base_reg_mean, label="Baseline BO", color="gray", lw=2, marker="v", markevery=max(1, len(steps)//10))
+    ax_reg.fill_between(steps, base_reg_mean - base_reg_std, base_reg_mean + base_reg_std, color="gray", alpha=0.2)
+    
+    # MN-BO 绘制
+    ax_reg.plot(steps, mnbo_reg_mean, label="MN-BO (Snowball)", color="red", lw=2, marker="o", markevery=max(1, len(steps)//10))
+    ax_reg.fill_between(steps, mnbo_reg_mean - mnbo_reg_std, mnbo_reg_mean + mnbo_reg_std, color="red", alpha=0.2)
+    
+    ax_reg.set_xlabel("Iterations (BO Steps)", fontsize=12)
+    ax_reg.set_ylabel("Simple Regret", fontsize=12)
+    ax_reg.set_title(f"Optimization Regret: {func_name.upper()}", fontsize=14, fontweight='bold')
+    ax_reg.grid(True, which="both", ls="-", alpha=0.3)
+    ax_reg.legend()
+    plt.tight_layout()
+
     # ---- 写日志 ----
     logger  = ExperimentLogger(func_obj)
     md_path = logger.log_experiment(
@@ -395,6 +476,7 @@ def run_experiment(func_name: str,
         best_x=float(xs_best[np.argmax(ys_best)][0]),
         best_y=float(ys_best.max()),
         fig=fig,
+        fig_reg=fig_reg, # 新增传入 regret 图像
     )
     logger.append_summary_row(
         summary_path,
@@ -415,7 +497,7 @@ def run_experiment(func_name: str,
         f.write(f"- 基线 Max 序列: `[{raw_base_str}]`\n")
         f.write(f"- MN-BO Max 序列: `[{raw_mnbo_str}]`\n")
 
-    # 将结果返回，用于最后大汇总（保留原始精度，仅展示层控制）
+    # 将结果返回，用于最后大汇总
     return {
         "avg_base_max": avg_base, "std_base_max": std_base,
         "avg_mnbo_max": avg_mnbo, "std_mnbo_max": std_mnbo,
@@ -423,7 +505,14 @@ def run_experiment(func_name: str,
         "base_success": base_success_rate,
         "mnbo_success": mnbo_success_rate,
         "raw_mnbo_str": f"[{raw_mnbo_str}]",
-        "total_time":   0
+        "total_time":   0,
+        # 新增：返回 Regret 统计信息用于全量大图绘制
+        "regret_stats": {
+            "base_mean": base_reg_mean,
+            "base_std":  base_reg_std,
+            "mnbo_mean": mnbo_reg_mean,
+            "mnbo_std":  mnbo_reg_std,
+        }
     }
 
 
@@ -605,20 +694,95 @@ if __name__ == "__main__":
     print(f"\n  总耗时: {total_time:.1f}s")
     print(f"  累计汇总报告：{summary_path}")
 
-    # 生成带时间戳的批次汇总文件
-    batch_summary_path = os.path.join(summary_dir, f"batch_summary_{ts}.md")
-    with open(batch_summary_path, "w", encoding="utf-8") as f:
-        f.write(f"# 批量实验汇总报告（滚雪球多视角搜索）\n\n")
-        f.write(f"- **生成时间**: {ts}\n")
-        f.write(f"- **参数配置**: 外层初始点={_IM}, 外层迭代M={_M}, 内层N={_N}, 重复={_R}次\n")
-        f.write(f"- **基线/MN-BO总预算**: {(_IM + _M) * _N} 步\n")
-        sys.stdout.flush()
-        f.write("| 函数 | 基线 Max | MN-BO Max | 基线成功率 | MN-BO 成功率 | 原始数据 (MN-BO) |\n")
-        f.write("|------|-----------|-----------|------------|--------------|-------------------|\n")
-        for name, r in results.items():
-            f.write(f"| {name} | {r['avg_base_max']:.4f}±{r['std_base_max']:.4f} | "
-                    f"{r['avg_mnbo_max']:.4f}±{r['std_mnbo_max']:.4f} | "
-                    f"{r['base_success']*100:.1f}% | "
-                    f"{r['mnbo_success']*100:.1f}% | "
-                    f"`{r['raw_mnbo_str']}` |\n")
-    print(f"  单次批次汇总：{batch_summary_path}")
+    # ---- [新增] 生成全函数 Regret 网格大图 ----
+    print(f"\n  [绘图] 正在生成全函数 Regret 网格汇总图...")
+    n_funcs = len(chosen)
+    n_cols  = 3
+    n_rows  = (n_funcs + n_cols - 1) // n_cols
+    
+    fig_grid, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4))
+    if isinstance(axes, np.ndarray):
+        axes = axes.flatten()
+    else:
+        axes = [axes]
+    
+    for i, name in enumerate(chosen):
+        ax = axes[i]
+        stats = results[name]["regret_stats"]
+        b_m, b_s = stats["base_mean"], stats["base_std"]
+        m_m, m_s = stats["mnbo_mean"], stats["mnbo_std"]
+        steps = np.arange(len(b_m))
+        
+        ax.plot(steps, b_m, color="gray", lw=1.5, label="Base")
+        ax.fill_between(steps, b_m - b_s, b_m + b_s, color="gray", alpha=0.15)
+        ax.plot(steps, m_m, color="red", lw=1.5, label="MN-BO")
+        ax.fill_between(steps, m_m - m_s, m_m + m_s, color="red", alpha=0.15)
+        
+        ax.set_title(name.replace("_func", "").upper(), fontsize=11, fontweight="bold")
+        ax.grid(True, ls="--", alpha=0.3)
+        if i % n_cols == 0: ax.set_ylabel("Regret")
+        if i >= (n_rows - 1) * n_cols: ax.set_xlabel("Steps")
+        if i == 0: ax.legend(fontsize=8)
+
+    # 隐藏多余的子图
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+        
+    plt.tight_layout()
+    
+    # 保存大图
+    summary_plot_dir = "results/summary/plots"
+    os.makedirs(summary_plot_dir, exist_ok=True)
+    grid_plot_filename = f"grid_regret_{ts}.png"
+    grid_plot_path = os.path.join(summary_plot_dir, grid_plot_filename)
+    fig_grid.savefig(grid_plot_path, dpi=120, bbox_inches="tight")
+    plt.close(fig_grid)
+    print(f"  网格汇总图已保存: {grid_plot_path}")
+
+    # ---- [新增] 生成全函数“大乱斗”综合对比图 ----
+    print(f"  [绘图] 正在生成全函数单图综合对比图...")
+    fig_comb, ax_comb = plt.subplots(figsize=(10, 7))
+    # 使用 colormap 为不同函数分配颜色
+    colors = plt.cm.tab20(np.linspace(0, 1, n_funcs))
+    
+    for i, name in enumerate(chosen):
+        stats = results[name]["regret_stats"]
+        b_m, b_s = stats["base_mean"], stats["base_std"]
+        m_m, m_s = stats["mnbo_mean"], stats["mnbo_std"]
+        steps = np.arange(len(m_m))
+        short_name = name.replace("_func", "").upper()
+        
+        # 绘制基线 (虚线)
+        ax_comb.plot(steps, b_m, color=colors[i], lw=1, ls="--", alpha=0.6)
+        # 绘制 MN-BO (实线)
+        ax_comb.plot(steps, m_m, label=short_name, color=colors[i], lw=2, alpha=0.9)
+        # 绘制阴影 (只给 MN-BO 绘阴影，防止画面太乱)
+        ax_comb.fill_between(steps, m_m - m_s, m_m + m_s, color=colors[i], alpha=0.1)
+        
+    ax_comb.set_xlabel("Iterations (BO Steps)", fontsize=12)
+    ax_comb.set_ylabel("Simple Regret", fontsize=12)
+    ax_comb.set_title("Combined Convergence: MN-BO (Solid) vs Baseline (Dashed)", fontsize=13, fontweight="bold")
+    ax_comb.grid(True, ls="--", alpha=0.3)
+    # 调整 Legend 位置到图外，防止遮挡
+    ax_comb.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+    plt.tight_layout()
+    
+    comb_plot_filename = f"combined_regret_{ts}.png"
+    comb_plot_path = os.path.join(summary_plot_dir, comb_plot_filename)
+    fig_comb.savefig(comb_plot_path, dpi=120, bbox_inches="tight")
+    plt.close(fig_comb)
+    print(f"  综合对比图已保存: {comb_plot_path}")
+
+    # ---- 更新汇总报告 Markdown，插入两张大图 ----
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write(f"\n\n## 全函数收敛汇总报告\n\n")
+        
+        f.write(f"### 1. 综合对比图 (All-in-One Plot)\n")
+        f.write(f"展示 MN-BO 在所有基准函数上的纵向收敛趋势对比。\n\n")
+        f.write(f"![综合对比图](plots/{comb_plot_filename})\n\n")
+        
+        f.write(f"### 2. 网格分布图 (Grid Plot)\n")
+        f.write(f"展示每个函数下 MN-BO 与基线的详细对比及误差带。\n\n")
+        f.write(f"![全函数网格图](plots/{grid_plot_filename})\n\n")
+        
+        f.write(f"---\n*End of Report*\n")
